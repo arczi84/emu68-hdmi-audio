@@ -1,0 +1,30 @@
+Upstream reference revisions retrieved for HDMITest 0.1
+
+https://github.com/rsta2/circle/tree/6177984e30fac5e65582d171d43f1563368a94ac
+https://github.com/michalsc/devicetree.resource/tree/064095a749f72df8fa5165670a7ed16911a566c7
+devicetree: no standalone LICENSE/COPYING file at this revision; see source headers.
+https://github.com/michalsc/mailbox.resource/tree/b6ed22dc7b46058d2a7454c34ce6dd27ab249449
+mailbox: no standalone LICENSE/COPYING file at this revision; see source headers.
+https://github.com/michalsc/Emu68/tree/0ba3a899341dee958332a4182911861420b03bff
+https://github.com/michalsc/VideoCore.card/tree/e49193a3499e25bafa4e35f502fa1a78712f77c6
+
+Additional protocol references for 0.2:
+https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface
+https://github.com/raspberrypi/firmware/wiki/Accessing-mailboxes
+https://github.com/michalsc/mailbox.resource/blob/master/src/rawcommand.c
+https://github.com/michalsc/mailbox.resource/blob/master/src/getclockrate.c
+
+Additional DMA references for 0.4 (retrieved 2026-09-12):
+https://github.com/rsta2/circle/blob/master/include/circle/dmacommon.h
+https://github.com/rsta2/circle/blob/master/include/circle/dmachannel.h
+https://github.com/rsta2/circle/blob/master/include/circle/bcm2835.h
+https://github.com/rsta2/circle/blob/master/include/circle/machineinfo.h
+https://github.com/rsta2/circle/blob/master/lib/dmachannel.cpp
+https://github.com/raspberrypi/linux/blob/rpi-6.6.y/arch/arm/boot/dts/broadcom/bcm2711.dtsi
+https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface#get-dma-channels
+
+AHI subdriver ABI and mixer contract:
+Martin Blom's AHI SDK, Developer/Docs/ahi_sub.doc and Include/C/.
+https://www.lysator.liu.se/ahi/v4-site/files/ahi/doc/ahi_sub.html
+AHI SDK Drivers/MODE_ID reserves 0x1f for experimental drivers.
+The driver uses modes 0x001f0010 and 0x001f0011 in the experimental range.

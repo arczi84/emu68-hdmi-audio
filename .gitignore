@@ -1,0 +1,8 @@
+/Source/build/
+/Source/dist/
+/Source/*.zip
+/Source/*.lha
+**/__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
