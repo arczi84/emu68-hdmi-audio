@@ -1,6 +1,6 @@
-Emu68 HDMI driver 4.16 - source code
-==================================
-The source snapshot corresponds to the supplied emu68hdmi.audio 4.16.
+Emu68 HDMI driver 4.17 - source code
+==========================================
+The source snapshot corresponds to the supplied emu68hdmi.audio 4.17.
 The optional EaglePlayer binary patch and its test are in EaglePlayer/.
 See ../README.txt for installation and current hardware test results.
 

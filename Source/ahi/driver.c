@@ -69,8 +69,8 @@ static void snapshot_failure(ULONG base) {
 }
 static LONG worker_entry(void);
 static const char name[] = "emu68hdmi.audio";
-static const char ident[] = "emu68hdmi.audio 4.16 (13.09.2026)\r\n";
-const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.16 (13.09.2026)";
+static const char ident[] = "emu68hdmi.audio 4.17 (13.10.2026)\r\n";
+const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.17 (13.10.2026)";
 
 struct DriverBase *driver_init(struct DriverBase *base, BPTR segment, struct ExecBase *exec)
 {
@@ -87,7 +87,7 @@ struct DriverBase *driver_init(struct DriverBase *base, BPTR segment, struct Exe
     base->lib.lib_Node.ln_Type=NT_LIBRARY;
     base->lib.lib_Node.ln_Name=(char *)name;
     base->lib.lib_Flags=LIBF_SUMUSED|LIBF_CHANGED;
-    base->lib.lib_Version=4; base->lib.lib_Revision=16;
+    base->lib.lib_Version=4; base->lib.lib_Revision=17;
     base->lib.lib_IdString=(APTR)ident;
     return base;
 }
