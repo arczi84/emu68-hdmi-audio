@@ -23,6 +23,8 @@
 #define HDMI_QUERY_FAULT_MAI 0x48444d5bUL
 #define HDMI_QUERY_FAULT_RAMSTATUS 0x48444d5cUL
 #define HDMI_QUERY_MAX_BURST 0x48444d5eUL /* longest refill burst after an IRQ, us */
+#define HDMI_QUERY_PRE_CALLS 0x48444d5fUL /* ahiac_PreTimer calls */
+#define HDMI_QUERY_PRE_SKIPS 0x48444dc0UL /* ... that asked to skip the mixer */
 #define HDMI_QUERY_RESYNC_AT 0x48444dc1UL /* completed-segment count at the last resync */
 #define HDMI_FAULT_NONE 0
 #define HDMI_FAULT_MIX 1

@@ -92,3 +92,15 @@ _gw_control:
  move.l d0,-(sp)
  jsr _driver_control
  RETURN 12
+
+| ULONG hdmi_call_timer(APTR fn, APTR ctrl): ahiac_PreTimer / ahiac_PostTimer want the
+| AHIAudioCtrlDrv in A2 (ahi_sub.doc, AHIsub_Start steps 2 and 5) and preserve every
+| register except D0, so only A2 is saved. D0 is the result of PreTimer.
+.globl _hdmi_call_timer
+_hdmi_call_timer:
+ move.l a2,-(sp)
+ move.l 12(sp),a2
+ move.l 8(sp),a0
+ jsr (a0)
+ move.l (sp)+,a2
+ rts

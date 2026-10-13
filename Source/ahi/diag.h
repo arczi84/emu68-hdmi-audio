@@ -64,6 +64,8 @@ static void hdmi_diag(struct Library *driver)
             (ULONG)hdmi_status(driver,HDMI_QUERY_FAULT_RAMSTATUS));
         printf("Last resync at completed segment %u (0 = none)\n",
             (ULONG)hdmi_status(driver,HDMI_QUERY_RESYNC_AT));
+        printf("AHI CPU overload protection: PreTimer called %u times, asked to skip the mixer %u times\n",
+            (ULONG)hdmi_status(driver,HDMI_QUERY_PRE_CALLS),(ULONG)hdmi_status(driver,HDMI_QUERY_PRE_SKIPS));
         printf("Longest refill burst after an IRQ: %u us (the mixer runs inside it)\n",
             (ULONG)hdmi_status(driver,HDMI_QUERY_MAX_BURST));
     }

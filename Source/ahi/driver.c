@@ -42,7 +42,7 @@ struct Playback {
     struct hdmi_process process;
     volatile ULONG command, running, stop_requested;
     const struct ring_geom *geom;
-    ULONG error, bvb, mix_bytes;
+    ULONG error, bvb, mix_bytes, skip_mix;
     void *mix;
     uint8_t *mix_storage;
     struct pcm_cursor pcm;
@@ -57,6 +57,9 @@ static volatile ULONG diag_mix_bits;
 static volatile ULONG diag_irq_id,diag_irqs,wakes,fault_mai,fault_ramstatus;
 static volatile ULONG max_burst;
 struct Library *GIC400_Base;
+static volatile ULONG pre_calls,pre_skips;
+/* Calls ahiac_PreTimer / ahiac_PostTimer: A2 must hold the audio control (entry.S). */
+extern ULONG hdmi_call_timer(APTR fn,APTR ctrl);
 static volatile ULONG resync_count,last_resync_reason,last_resync_at;
 static void snapshot_failure(ULONG base) {
     fault_cs=rd(base); fault_debug=rd(base+0x20); fault_cb=rd(base+4);
@@ -150,7 +153,8 @@ static int next_pcm(void *context,const void **samples,unsigned *count)
        c->ahiac_BuffSamples>p->mix_bytes/(p->pcm.hifi?8u:4u)) { diag_fault=1; Permit(); return 0; }
     *count=c->ahiac_BuffSamples;
     diag_stage=21;
-    CallHookPkt(c->ahiac_MixerFunc,c,p->mix);
+    if(p->skip_mix) memset(p->mix,0,c->ahiac_BuffSamples*(p->pcm.hifi?8u:4u));
+    else CallHookPkt(c->ahiac_MixerFunc,c,p->mix);
     diag_stage=22;
     if(!pcm_guard_ok(p->mix_storage,p->mix_bytes)) { diag_fault=1; Permit(); return 0; }
     *samples=p->mix;
@@ -159,13 +163,23 @@ static int next_pcm(void *context,const void **samples,unsigned *count)
 }
 /* Fills one free ring segment with AHI audio. Returns 1 on success, 0 if the PCM source stopped (STOP or
  * a hook fault, diag_fault says which), -1 on a cache/address failure. The conversion goes straight into the
- * DMA segment: no staging buffer and no Disable(). */
+ * DMA segment: no staging buffer and no Disable(). AHI's CPU overload protection (V4) is one Pre/PostTimer
+ * pair around each refill burst, as paula.audio does; when AHI asks to skip, the Player hook still runs but
+ * the mixer is replaced by silence. */
 static int fill_segment(struct Playback *p,uint8_t *dest,ULONG seg_bytes)
 {
+    struct AHIAudioCtrlDrv *actrl=p->ctrl;
     ULONG length=seg_bytes,address;
     int filled;
     CachePostDMA(dest,&length,DMA_ReadFromRAM);
+    p->skip_mix=0;
+    if(actrl->ahiac_PreTimer) {
+        p->skip_mix=(hdmi_call_timer((APTR)actrl->ahiac_PreTimer,actrl)&0xffffUL)!=0;
+        ++pre_calls;
+        if(p->skip_mix) ++pre_skips;
+    }
     filled=pcm_fill(&p->pcm,dest,p->geom->seg_frames,next_pcm,p);
+    if(actrl->ahiac_PostTimer) hdmi_call_timer((APTR)actrl->ahiac_PostTimer,actrl);
     if(!filled) return 0;
     length=seg_bytes;
     address=(ULONG)CachePreDMA(dest,&length,DMA_ReadFromRAM);
@@ -450,7 +464,7 @@ ULONG driver_start(ULONG flags,struct AHIAudioCtrlDrv *ctrl)
     p->pcm.hifi=(ctrl->ahiac_BuffType==AHIST_S32S);
     diag_mix_bits=p->pcm.hifi?32:16;
     diag_fault=0; diag_stage=2;
-    max_gap=total_refills=wakes=diag_irqs=max_burst=0;
+    max_gap=total_refills=wakes=diag_irqs=max_burst=pre_calls=pre_skips=0;
     resync_count=last_resync_reason=last_resync_at=0;
     fault_cs=fault_debug=fault_cb=0;
     Forbid();
@@ -529,6 +543,8 @@ LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
     case HDMI_QUERY_FEATURES: return 1; /* bit 0: interrupt driver */
     case HDMI_QUERY_MAX_BURST: return max_burst;
     case HDMI_QUERY_RESYNC_AT: return last_resync_at;
+    case HDMI_QUERY_PRE_CALLS: return pre_calls;
+    case HDMI_QUERY_PRE_SKIPS: return pre_skips;
     case HDMI_QUERY_FAULT_MAI: return fault_mai;
     case HDMI_QUERY_FAULT_RAMSTATUS: return fault_ramstatus;
     case HDMI_QUERY_IRQ_ID: return diag_irq_id;
