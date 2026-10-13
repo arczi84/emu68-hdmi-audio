@@ -58,6 +58,9 @@ static volatile ULONG diag_irq_id,diag_irqs,wakes,fault_mai,fault_ramstatus;
 static volatile ULONG max_burst;
 struct Library *GIC400_Base;
 static volatile ULONG pre_calls,pre_skips;
+/* Master volume, AHI "Fixed" (0x10000 = unity): AHIC_OutputVolume of AHIsub_HardwareControl, applied when the samples are packed.
+ * AHI Prefs shows it as the Output volume of the unit, and AHI sets it when a program allocates the unit's mode. */
+static volatile ULONG master_gain=65536UL;
 /* Calls ahiac_PreTimer / ahiac_PostTimer: A2 must hold the audio control (entry.S). */
 extern ULONG hdmi_call_timer(APTR fn,APTR ctrl);
 static volatile ULONG resync_count,last_resync_reason,last_resync_at;
@@ -187,6 +190,7 @@ static int fill_segment(struct Playback *p,uint8_t *dest,ULONG seg_bytes)
         ++pre_calls;
         if(p->skip_mix) ++pre_skips;
     }
+    p->pcm.gain_target=master_gain;
     filled=pcm_fill(&p->pcm,dest,p->geom->seg_frames,next_pcm,p);
     if(actrl->ahiac_PostTimer) hdmi_call_timer((APTR)actrl->ahiac_PostTimer,actrl);
     if(!filled) return 0;
@@ -484,6 +488,9 @@ ULONG driver_start(ULONG flags,struct AHIAudioCtrlDrv *ctrl)
     pcm_guard_init(p->mix_storage,p->mix_bytes);
     p->mix=p->mix_storage+PCM_GUARD_BYTES;
     p->pcm.hifi=(ctrl->ahiac_BuffType==AHIST_S32S);
+    /* Start at the master gain set now, not at unity: no swell when playback starts */
+    p->pcm.gain_enable=1; p->pcm.gain_target=master_gain; p->pcm.gain_goal=master_gain;
+    p->pcm.gain_cur=(int)(master_gain>>1)<<15; p->pcm.gain_step=0; p->pcm.ramp=0; p->pcm.gain_init=1;
     diag_mix_bits=p->pcm.hifi?32:16;
     diag_fault=0; diag_stage=2;
     max_gap=total_refills=wakes=diag_irqs=max_burst=pre_calls=pre_skips=0;
@@ -555,6 +562,9 @@ LONG driver_attr(ULONG attr,LONG arg,LONG def,struct TagItem *tags,struct AHIAud
         const struct ring_geom *g=mode_geom(tags);
         return (g->segs+1)*g->seg_frames+(ctrl?ctrl->ahiac_MaxBuffSamples:65535);
     }
+    /* The output volume can only attenuate: about -60 dB up to unity (a Fixed value, 0x10000 = 1.0). */
+    case AHIDB_MinOutputVolume: return 0x41;
+    case AHIDB_MaxOutputVolume: return 0x10000;
     case AHIDB_Outputs: return 1;
     case AHIDB_Output: return (LONG)"Raspberry Pi 4 HDMI0";
     case AHIDB_Inputs: return 0;
@@ -565,10 +575,12 @@ LONG driver_attr(ULONG attr,LONG arg,LONG def,struct TagItem *tags,struct AHIAud
 /* Read-only snapshots. No live MMIO and no AHI calls from diagnostics. */
 LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
 {
-    (void)arg; (void)ctrl;
+    (void)ctrl;
     switch(attr) {
+    case AHIC_OutputVolume_Query: return (LONG)master_gain;
+    case AHIC_OutputVolume: master_gain=arg<0?0UL:(arg>65536L?65536UL:(ULONG)arg); return TRUE;
     case HDMI_QUERY_MIX_BITS: return diag_mix_bits;
-    case HDMI_QUERY_FEATURES: return 1; /* bit 0: interrupt driver */
+    case HDMI_QUERY_FEATURES: return 3; /* bit 0: interrupt driver, bit 1: master volume */
     case HDMI_QUERY_MAX_BURST: return max_burst;
     case HDMI_QUERY_RESYNC_AT: return last_resync_at;
     case HDMI_QUERY_PRE_CALLS: return pre_calls;

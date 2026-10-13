@@ -17,8 +17,8 @@ int main(void)
     WORD *pcm=NULL;
     int opened=0,result=20;
     ULONG i,error,cycle;
-    LONG options[4]={0};
-    struct RDArgs *args=ReadArgs((CONST_STRPTR)"RESTART/S,STALL/S,HIFI/S,LOW/S",options,NULL);
+    LONG options[6]={0};
+    struct RDArgs *args=ReadArgs((CONST_STRPTR)"RESTART/S,STALL/S,HIFI/S,LOW/S,VOLUME/K/N,DEFAULT/S",options,NULL);
     struct TagItem tags[]={ {AHIA_AudioID,HDMI_MODE}, {AHIA_MixFreq,48000},
         {AHIA_Channels,1}, {AHIA_Sounds,1}, {TAG_DONE,0} };
     struct TagItem play[]={ {AHIC_Play,TRUE}, {TAG_DONE,0} };
@@ -27,6 +27,7 @@ int main(void)
     if(!args) { PrintFault(IoErr(),(CONST_STRPTR)"HDMIAHITest"); return 20; }
     if(options[2]) tags[0].ti_Data=0x001f0011UL;
     if(options[3]) tags[0].ti_Data+=2;  /* low latency twins: 001f0012 / 001f0013 */
+    if(options[5]) tags[0].ti_Data=AHI_DEFAULT_ID;  /* the mode the user chose for the Music unit in AHI Prefs */
     printf("HDMIAHITest 0.10 - direct AHI, mode %08x%s; RESTART = 3 START/STOP cycles\n",
         tags[0].ti_Data,options[2]?" HiFi":"");
     port=CreateMsgPort();
@@ -42,6 +43,20 @@ int main(void)
     ctrl=AHI_AllocAudioA(tags);
     if(!ctrl) { puts("AHI_AllocAudio failed. Check installed driver/mode, HDMI and mailbox.resource."); goto done; }
     driver=OpenLibrary((CONST_STRPTR)"emu68hdmi.audio",4);
+    {   /* The standard master volume: what AHI left after AllocAudio (the unit setting of AHI Prefs), then VOLUME = percent of unity */
+        LONG volume=-1;
+        struct TagItem query[]={ {AHIC_OutputVolume_Query,0}, {TAG_DONE,0} };
+        query[0].ti_Data=(ULONG)&volume;
+        AHI_ControlAudioA(ctrl,query);
+        printf("AHIC_OutputVolume after AllocAudio: %d.%03d (1.000 = unity)\n",(int)(volume>>16),(int)(((volume&0xffffL)*1000L)>>16));
+        if(options[4]) {
+            struct TagItem set[]={ {AHIC_OutputVolume,0}, {TAG_DONE,0} };
+            set[0].ti_Data=(ULONG)((*(ULONG *)options[4]*0x10000UL)/100UL);
+            AHI_ControlAudioA(ctrl,set);
+            AHI_ControlAudioA(ctrl,query);
+            printf("AHIC_OutputVolume set to %u%%, now %d.%03d\n",(ULONG)*(ULONG *)options[4],(int)(volume>>16),(int)(((volume&0xffffL)*1000L)>>16));
+        }
+    }
     if(driver) printf("Resident HDMI driver: %u.%u\n",driver->lib_Version,driver->lib_Revision);
     if(options[1] && (!driver || driver->lib_Version!=4 || driver->lib_Revision!=10)) {
         puts("STALL is only supported by driver 4.10; use RESTART without STALL"); goto done;

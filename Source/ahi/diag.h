@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef HDMI_DIAG_H
 #define HDMI_DIAG_H
+#include <exec/types.h>
+#include <devices/ahi.h>
 #include "status.h"
 extern LONG hdmi_status(struct Library *,ULONG);
 static const char *hdmi_stage_name(ULONG stage)
@@ -55,6 +57,10 @@ static void hdmi_diag(struct Library *driver)
         ULONG bits=(ULONG)hdmi_status(driver,HDMI_QUERY_MIX_BITS);
         if(bits) printf("Last START mixer: %u bit%s -> HDMI %u bit, 48000 Hz\n",
             bits,bits==32?" HiFi":"",bits==32?24u:16u);
+    }
+    if(hdmi_status(driver,HDMI_QUERY_FEATURES)&2) {
+        ULONG volume=(ULONG)hdmi_status(driver,AHIC_OutputVolume_Query);
+        printf("Master volume (AHIC_OutputVolume): %u.%03u (1.000 = unity)\n",volume>>16,(ULONG)(((volume&0xffffUL)*1000UL)>>16));
     }
     if(hdmi_status(driver,HDMI_QUERY_FEATURES)&1) {
         printf("IRQ: gic_id=%u completed=%u worker_wakes=%u (max_gap above: longest IRQ to worker delay)\n",

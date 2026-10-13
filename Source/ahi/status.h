@@ -16,7 +16,7 @@
 #define HDMI_QUERY_FAULT_DEBUG 0x48444d55UL
 #define HDMI_QUERY_FAULT_CB 0x48444d56UL
 #define HDMI_QUERY_MIX_BITS 0x48444d57UL
-#define HDMI_QUERY_FEATURES 0x48444dc2UL /* bit 0: DMA interrupt driver (the queries below exist) */
+#define HDMI_QUERY_FEATURES 0x48444dc2UL /* bit 0: DMA interrupt driver (the queries below exist), bit 1: master volume (AHIC_OutputVolume) */
 #define HDMI_QUERY_IRQ_ID 0x48444d58UL
 #define HDMI_QUERY_IRQS 0x48444d59UL
 #define HDMI_QUERY_WAKES 0x48444d5aUL

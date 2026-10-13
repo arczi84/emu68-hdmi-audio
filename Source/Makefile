@@ -28,6 +28,8 @@ test:
 	./build/ring_test
 	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/pcm_fast_test.c -o build/pcm_fast_test
 	./build/pcm_fast_test
+	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/gain_test.c -o build/gain_test
+	./build/gain_test
 
 test-cli: all
 	python3 tests/cli_test.py
