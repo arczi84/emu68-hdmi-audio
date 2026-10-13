@@ -1,12 +1,17 @@
-Emu68 HDMI driver 4.16 - source code
-==================================
-The source snapshot corresponds to the supplied emu68hdmi.audio 4.16.
+Emu68 HDMI driver 4.17 - source code
+==========================================
+The source snapshot corresponds to the supplied emu68hdmi.audio 4.17.
 The optional EaglePlayer binary patch and its test are in EaglePlayer/.
 See ../README.txt for installation and current hardware test results.
 
 BUILDING
-Use a GCC m68k-amigaos cross compiler with AmigaOS headers and libnix.
-Put its executables on PATH, then run:
+Use a GCC m68k-amigaos cross compiler with AmigaOS headers and libnix (it needs its
+sfdc tool). Fetch the three submodules once (devicetree.resource, mailbox.resource,
+gic400.library; not --recursive, mailbox.resource has a devicetree.resource of its own):
+
+  git submodule update --init
+
+Put the toolchain executables on PATH, then run:
 
   make
 

@@ -2,7 +2,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 import shutil
 root = Path(__file__).resolve().parents[1]
-archive_path = root / 'Emu68HDMI-AHI-4.16.zip'
+archive_path = root / 'Emu68HDMI-AHI-4.17.zip'
 with ZipFile(archive_path, 'w', ZIP_DEFLATED) as z:
     for src, dest in [
         ('dist/emu68hdmi.audio', 'Devs/AHI/emu68hdmi.audio'),

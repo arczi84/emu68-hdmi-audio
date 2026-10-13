@@ -43,7 +43,14 @@ _gw_\name:
  jsr _driver_\name
  RETURN 4
 .endm
-CTRL alloc
+| AHIsub_AllocAudio(tags=A1, ctrl=A2): both are needed, the tags carry the mode ID.
+.globl _gw_alloc
+_gw_alloc:
+ SAVE
+ move.l a2,-(sp)
+ move.l a1,-(sp)
+ jsr _driver_alloc
+ RETURN 8
 CTRL free
 .macro NONE name
 .globl _gw_\name
@@ -66,15 +73,17 @@ _gw_\name:
 .endm
 FLAGS start
 FLAGS stop
+| AHIsub_GetAttr(attr=D0, arg=D1, def=D2, tags=A1, ctrl=A2)
 .globl _gw_attr
 _gw_attr:
  SAVE
  move.l a2,-(sp)
+ move.l a1,-(sp)
  move.l d2,-(sp)
  move.l d1,-(sp)
  move.l d0,-(sp)
  jsr _driver_attr
- RETURN 16
+ RETURN 20
 .globl _gw_null
 _gw_null:
  moveq #0,d0
@@ -92,3 +101,15 @@ _gw_control:
  move.l d0,-(sp)
  jsr _driver_control
  RETURN 12
+
+| ULONG hdmi_call_timer(APTR fn, APTR ctrl): ahiac_PreTimer / ahiac_PostTimer want the
+| AHIAudioCtrlDrv in A2 (ahi_sub.doc, AHIsub_Start steps 2 and 5) and preserve every
+| register except D0, so only A2 is saved. D0 is the result of PreTimer.
+.globl _hdmi_call_timer
+_hdmi_call_timer:
+ move.l a2,-(sp)
+ move.l 12(sp),a2
+ move.l 8(sp),a0
+ jsr (a0)
+ move.l (sp)+,a2
+ rts

@@ -7,6 +7,7 @@ _test_attr:
  moveq #0,d1
  move.l #12345,d2
  sub.l a2,a2
+ sub.l a1,a1
  jsr -108(a6)
  movem.l (sp)+,d2/a2/a6
  rts
@@ -27,6 +28,7 @@ _test_attr_ctrl:
  move.l 24(sp),a2
  moveq #0,d1
  move.l #12345,d2
+ sub.l a1,a1
  jsr -108(a6)
  movem.l (sp)+,d2/a2/a6
  rts
