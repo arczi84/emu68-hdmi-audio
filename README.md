@@ -1,4 +1,4 @@
-# Emu68 HDMI driver for AHI — Coded with AI
+# Emu68 HDMI driver for AHI â€” Coded with AI
 
 Driver version **4.17**. Includes the optional EaglePlayer **AHI Amplifier 10.20** engine patched to work with this driver.
 
@@ -21,7 +21,7 @@ every wake-up is expensive, and a game that renders on the same CPU feels it. Th
 | More counters in `HDMIDiag`; host tests (`ring_test`, `pcm_fast_test`, `gain_test`) | the ring arithmetic is unit-tested, the packer is checked bit for bit against the old `iec958()`, and the gain against exact values |
 
 The HDMI/Circle initialisation, the mailbox use and the process lifetime code are unchanged. The driver stays an AHI **V4**
-driver: it runs under AHI 4.18 and AHI 6.x.
+driver. This release requires AHI 6.x; tested with AHI 6.6. AHI 4.18 compatibility is unverified.
 
 ## Audio modes
 
@@ -80,7 +80,7 @@ in memory is not replaced by copying a file. In Prefs/AHI, select an Emu68 HDMI 
 Music Unit and Units 0-3, then save. Applications with their own AHI mode selector also need HDMI selected in their settings.
 Roll back by restoring the two files you backed up and rebooting.
 
-Requirements (4.16 and 4.17): Raspberry Pi 4 / CM4, an HDMI display on **HDMI0**, AHI 4.18 or 6.x, and **Emu68 1.1 or later with
+Requirements (4.16 and 4.17): Raspberry Pi 4 / CM4, an HDMI display on **HDMI0**, AHI 6.x (tested with 6.6), and **Emu68 1.1 or later with
 its embedded Emu68 ROM**. The driver does not load anything itself: it opens `devicetree.resource`, `mailbox.resource` and (4.17)
 `gic400.library` (version 1.3 or later; `Version gic400.library` must answer 1.3+), which the ROM of Emu68 1.1+ exposes. **Emu68 1.0
 and earlier versions are not compatible.**

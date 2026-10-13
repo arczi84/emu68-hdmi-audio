@@ -15,7 +15,7 @@ select Emu68 HDMI:16 bit stereo 48 kHz for Music Unit and Units 0-3, then
 save. Applications with their own AHI mode selector also need HDMI selected
 in their settings. Optional modes: HiFi 24 bit, and a low latency twin of
 each (better for games, less margin against stalls).
-Requires Emu68 1.1 or later with its embedded ROM, which provides
+Requires AHI 6.x (tested with 6.6) and Emu68 1.1 or later with its embedded ROM, which provides
 devicetree.resource, mailbox.resource and gic400.library (1.3 or later,
 used by 4.17). Emu68 1.0 and earlier are not compatible.
 See HISTORY.md for the version history.

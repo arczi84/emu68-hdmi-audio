@@ -1,7 +1,7 @@
 emu68hdmi.audio 4.17
 ==========================
 AHI HDMI subdriver for PiStorm with Raspberry Pi 4 and Emu68.
-Tested with Emu68 1.1 and AHI 6.6; implements the AHI V4 subdriver ABI.
+Requires AHI 6.x (tested with 6.6). Tested with Emu68 1.1; implements the AHI V4 subdriver ABI.
 Version 4.17 is the driver version, not the version of AHI.
 
 FEATURES
