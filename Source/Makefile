@@ -24,6 +24,8 @@ test:
 	./build/dma_test
 	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/stream_test.c -o build/stream_test
 	./build/stream_test
+	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/pcm_fast_test.c -o build/pcm_fast_test
+	./build/pcm_fast_test
 
 test-cli: all
 	python3 tests/cli_test.py
