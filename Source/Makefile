@@ -24,6 +24,8 @@ test:
 	./build/dma_test
 	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/stream_test.c -o build/stream_test
 	./build/stream_test
+	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/ring_test.c -o build/ring_test
+	./build/ring_test
 	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/pcm_fast_test.c -o build/pcm_fast_test
 	./build/pcm_fast_test
 
@@ -54,8 +56,8 @@ clean:
 
 
 .PHONY: copy-ahi test-ahi package-ahi
-AHI_FLAGS = $(CFLAGS) -Ivendor/ahi
-AHI_DEPS = ahi/refill.h ahi/pacing.h ahi/buffering.h ahi/watchdog.h ahi/guard.h ahi/status.h ahi/lifetime.h ahi/lifetime.c ahi/lifetime.S ahi/pcm.h src/hdmi_backend.h src/audio.h src/stream.h src/dma_control.h src/dma_plan.h src/clock_reply.h
+AHI_FLAGS = $(CFLAGS) -Ivendor/ahi -Ivendor/gic400
+AHI_DEPS = ahi/ring.h ahi/refill.h ahi/pacing.h ahi/buffering.h ahi/watchdog.h ahi/guard.h ahi/status.h ahi/lifetime.h ahi/lifetime.c ahi/lifetime.S ahi/pcm.h src/hdmi_backend.h src/audio.h src/stream.h src/dma_control.h src/dma_plan.h src/clock_reply.h
 
 dist/emu68hdmi.audio: ahi/entry.S ahi/driver.c ahi/runtime.c $(AHI_DEPS)
 	mkdir -p dist

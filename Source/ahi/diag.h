@@ -13,7 +13,7 @@ static const char *hdmi_stage_name(ULONG stage)
     case 14:return "initial DMA reset"; case 15:return "prepare HDMI";
     case 16:return "enable DMA/HDMI";
     case 20:return "Player hook"; case 21:return "Mixer hook"; case 22:return "Mixer returned";
-    case 30:return "stream loop"; case 40:return "stop DMA";
+    case 29:return "waiting for DMA interrupt"; case 30:return "refilling ring"; case 40:return "stop DMA";
     case 41:return "restore/mute HDMI"; case 42:return "free DMA buffers";
     case 70:return "recovering after missed deadline";
     case 50:return "worker idle"; case 60:return "FreeAudio entry";
@@ -55,6 +55,17 @@ static void hdmi_diag(struct Library *driver)
         ULONG bits=(ULONG)hdmi_status(driver,HDMI_QUERY_MIX_BITS);
         if(bits) printf("Last START mixer: %u bit%s -> HDMI %u bit, 48000 Hz\n",
             bits,bits==32?" HiFi":"",bits==32?24u:16u);
+    }
+    if(hdmi_status(driver,HDMI_QUERY_FEATURES)&1) {
+        printf("IRQ: gic_id=%u completed=%u worker_wakes=%u (max_gap above: longest IRQ to worker delay)\n",
+            (ULONG)hdmi_status(driver,HDMI_QUERY_IRQ_ID),(ULONG)hdmi_status(driver,HDMI_QUERY_IRQS),
+            (ULONG)hdmi_status(driver,HDMI_QUERY_WAKES));
+        printf("At fault: MAI_CTL=%08x RAM_STATUS=%08x\n",(ULONG)hdmi_status(driver,HDMI_QUERY_FAULT_MAI),
+            (ULONG)hdmi_status(driver,HDMI_QUERY_FAULT_RAMSTATUS));
+        printf("Last resync at completed segment %u (0 = none)\n",
+            (ULONG)hdmi_status(driver,HDMI_QUERY_RESYNC_AT));
+        printf("Longest refill burst after an IRQ: %u us (the mixer runs inside it)\n",
+            (ULONG)hdmi_status(driver,HDMI_QUERY_MAX_BURST));
     }
     fflush(stdout);
 }

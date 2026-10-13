@@ -16,6 +16,14 @@
 #define HDMI_QUERY_FAULT_DEBUG 0x48444d55UL
 #define HDMI_QUERY_FAULT_CB 0x48444d56UL
 #define HDMI_QUERY_MIX_BITS 0x48444d57UL
+#define HDMI_QUERY_FEATURES 0x48444dc2UL /* bit 0: DMA interrupt driver (the queries below exist) */
+#define HDMI_QUERY_IRQ_ID 0x48444d58UL
+#define HDMI_QUERY_IRQS 0x48444d59UL
+#define HDMI_QUERY_WAKES 0x48444d5aUL
+#define HDMI_QUERY_FAULT_MAI 0x48444d5bUL
+#define HDMI_QUERY_FAULT_RAMSTATUS 0x48444d5cUL
+#define HDMI_QUERY_MAX_BURST 0x48444d5eUL /* longest refill burst after an IRQ, us */
+#define HDMI_QUERY_RESYNC_AT 0x48444dc1UL /* completed-segment count at the last resync */
 #define HDMI_FAULT_NONE 0
 #define HDMI_FAULT_MIX 1
 #define HDMI_FAULT_DMA 2
@@ -35,4 +43,6 @@
 #define HDMI_FAULT_PROCESS 16
 #define HDMI_FAULT_TIMER_IO 17
 #define HDMI_FAULT_MIX_DEADLINE 18
+#define HDMI_FAULT_IRQ_SETUP 19
+#define HDMI_FAULT_IRQ_LOST 20
 #endif

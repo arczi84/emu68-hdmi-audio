@@ -10,6 +10,8 @@
 #include "buffering.h"
 #include <libraries/ahi_sub.h>
 #include <proto/utility.h>
+#include <exec/interrupts.h>
+#include <proto/gic400.h>
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 struct Library *UtilityBase;
@@ -20,18 +22,26 @@ struct Library *UtilityBase;
 #include "../src/hdmi_backend.h"
 #include "pcm.h"
 #include "pacing.h"
-#include "refill.h"
+#include "ring.h"
 #include "lifetime.h"
 #include "status.h"
-#include "watchdog.h"
 #include "guard.h"
 
 struct DriverBase { struct Library lib; BPTR segment; };
+/* Shared with the interrupt handler. */
+struct irq_ctx {
+    volatile ULONG count, stamp, error, calls;
+    ULONG base, mask;
+    struct Task *task;
+};
 struct Playback {
+    struct Interrupt irq;
+    struct irq_ctx ctx;
     struct SignalSemaphore gate;
     struct AHIAudioCtrlDrv *ctrl;
     struct hdmi_process process;
     volatile ULONG command, running, stop_requested;
+    const struct ring_geom *geom;
     ULONG error, bvb, mix_bytes;
     void *mix;
     uint8_t *mix_storage;
@@ -44,7 +54,10 @@ static volatile ULONG diag_stage,diag_fault,diag_ctrl,diag_dma,diag_result;
 static volatile ULONG max_gap,total_refills;
 static volatile ULONG fault_cs,fault_debug,fault_cb;
 static volatile ULONG diag_mix_bits;
-static volatile ULONG resync_count,last_resync_reason;
+static volatile ULONG diag_irq_id,diag_irqs,wakes,fault_mai,fault_ramstatus;
+static volatile ULONG max_burst;
+struct Library *GIC400_Base;
+static volatile ULONG resync_count,last_resync_reason,last_resync_at;
 static void snapshot_failure(ULONG base) {
     fault_cs=rd(base); fault_debug=rd(base+0x20); fault_cb=rd(base+4);
 }
@@ -96,6 +109,7 @@ BPTR driver_close(struct DriverBase *base)
     if (base->lib.lib_OpenCnt) --base->lib.lib_OpenCnt;
     return base->lib.lib_Flags & LIBF_DELEXP ? driver_expunge(base) : 0;
 }
+static const struct ring_geom geom_long={RING_LONG_SEGS,RING_LONG_SEG_FRAMES};
 ULONG driver_alloc(struct AHIAudioCtrlDrv *ctrl)
 {
     struct Playback *p;
@@ -109,7 +123,7 @@ ULONG driver_alloc(struct AHIAudioCtrlDrv *ctrl)
         Permit(); FreeVec(p); return AHISF_ERROR;
     }
     AddSemaphore(&p->gate); owner=p; Permit();
-    ctrl->ahiac_DriverData=p; p->ctrl=ctrl;
+    ctrl->ahiac_DriverData=p; p->ctrl=ctrl; p->geom=&geom_long;
     io=0;
     if (!discover()) return AHISF_ERROR;
     /* Require the serialized resource in the driver; no direct mailbox fallback. */
@@ -143,21 +157,79 @@ static int next_pcm(void *context,const void **samples,unsigned *count)
     Permit();
     return 1;
 }
+/* Fills one free ring segment with AHI audio. Returns 1 on success, 0 if the PCM source stopped (STOP or
+ * a hook fault, diag_fault says which), -1 on a cache/address failure. The conversion goes straight into the
+ * DMA segment: no staging buffer and no Disable(). */
+static int fill_segment(struct Playback *p,uint8_t *dest,ULONG seg_bytes)
+{
+    ULONG length=seg_bytes,address;
+    int filled;
+    CachePostDMA(dest,&length,DMA_ReadFromRAM);
+    filled=pcm_fill(&p->pcm,dest,p->geom->seg_frames,next_pcm,p);
+    if(!filled) return 0;
+    length=seg_bytes;
+    address=(ULONG)CachePreDMA(dest,&length,DMA_ReadFromRAM);
+    if(length!=seg_bytes || address!=(ULONG)dest) return -1;
+    return 1;
+}
+/* The handler is called by gic400.library as a subroutine (A6 = SysBase,
+ * A1 = is_Data) from the INTB_EXTER server chain. The line is level
+ * triggered: the channel's INT flag must be cleared or it storms. The CS
+ * write keeps ACTIVE and the priority fields, so the ring is never paused. */
+static ULONG irq_handler(register struct irq_ctx *c asm("a1"))
+{
+    ULONG cs=rd(c->base);
+    ++c->calls;
+    if(!(cs&DMA_CS_INT)) return 0;
+    if(cs&DMA_CS_ERROR) {
+        wr(c->base,DMA_CS_INT);
+        c->error=cs|1UL;
+    } else {
+        wr(c->base,DMA_CS_START|DMA_CS_INT);
+    }
+    c->stamp=rd(TIMER);
+    ++c->count;
+    Signal(c->task,c->mask);
+    return 0;
+}
+/* GIC id of a legacy channel from the device tree: three cells per entry
+ * (type, number, flags), a SPI (type 0) has GIC id number+32. Channels 0..6
+ * have a private line; 7/8 and 9/10 share one, and gic400.library accepts a
+ * single server per line. */
+static ULONG dma_channel_irq(int channel)
+{
+    static const char *const nodes[]={"/soc/dma-controller@7e007000","/soc/dma@7e007000"};
+    ULONG irq=0,length=0;
+    unsigned n;
+    for(n=0;n<2 && !irq;++n) {
+        APTR key=DT_OpenKey((CONST_STRPTR)nodes[n]);
+        const ULONG *cells;
+        if(!key) continue;
+        cells=prop(key,"interrupts",&length);
+        if(cells && (ULONG)channel<length/12u && cells[3*channel]==0)
+            irq=cells[3*channel+1]+32;
+        DT_CloseKey(key);
+    }
+    return irq;
+}
 static ULONG playback(struct Playback *p)
 {
-    uint8_t *plan=NULL,*staging=NULL;
+    const struct ring_geom *g=p->geom;
+    const ULONG seg_bytes=ring_seg_bytes(g),data_off=ring_data_offset(g),plan_bytes=ring_plan_bytes(g);
+    uint8_t *plan=NULL;
     struct MsgPort *timer_port=NULL;
     struct timerequest *timer=NULL;
-    int timer_open=0;
-    struct pcm_pacer pacer;
-    struct ahi_refill refill={0};
+    int timer_open=0, timer_pending=0;
     ULONG mask, length, physical, bus=0, base=0, original_enable=0;
-    ULONG cs[8], cb[8], debug[8], last_seen, now;
-    int channel=-1, configured=0, quiet=1;
+    ULONG cs[8], cb[8], debug[8];
+    ULONG irq_id=0, written=0, last_count=0, wait_mask;
+    int channel=-1, configured=0, quiet=1, irq_added=0;
+    BYTE irq_sig=-1;
     ULONG result=AHIE_UNKNOWN;
     unsigned i;
     if(p->stop_requested) return AHIE_OK;
     diag_stage=9;
+    /* The only timer left is a watchdog for a lost interrupt, 4 Hz. */
     timer_port=CreateMsgPort();
     if(!timer_port) { diag_fault=HDMI_FAULT_TIMER_PORT; goto done; }
     timer=(struct timerequest *)CreateIORequest(timer_port,sizeof(*timer));
@@ -167,21 +239,21 @@ static ULONG playback(struct Playback *p)
     }
     timer_open=1;
     diag_stage=10;
-    mask=query_dma_mask();
+    mask=query_dma_mask()&0x7fu;
     if (!mask) { diag_fault=11; goto done; }
     diag_stage=11;
-    plan=allocate_dma_memory(STREAM_PLAN_BYTES);
-    staging=AllocMem(STREAM_BUFFER_BYTES,MEMF_PUBLIC|MEMF_FAST);
-    if (!plan || !staging) { diag_fault=12; result=AHIE_NOMEM; goto done; }
-    memset(plan,0,STREAM_PLAN_BYTES);
-    /* Start DMA with valid IEC958 silence. Do not consume 288 ms of AHI
-     * input before the client can run and replenish its linked writes. */
-    pcm_silence(plan+STREAM_DATA_OFFSET,2u*STREAM_BUFFER_FRAMES);
-    if(!stream_build_ring(plan,(ULONG)plan)) goto done;
+    plan=allocate_dma_memory(plan_bytes);
+    if (!plan) { diag_fault=12; result=AHIE_NOMEM; goto done; }
+    memset(plan,0,plan_bytes);
+    /* Start DMA with valid IEC958 silence. Do not consume AHI input before
+     * the client can run and replenish the ring. */
+    for(i=0;i<g->segs;++i)
+        pcm_silence(plan+data_off+i*seg_bytes,g->seg_frames);
+    if(!ring_build(plan,(ULONG)plan,g)) goto done;
     diag_stage=12;
-    length=STREAM_PLAN_BYTES;
+    length=plan_bytes;
     physical=(ULONG)CachePreDMA(plan,&length,DMA_ReadFromRAM);
-    if (physical!=(ULONG)plan || length!=STREAM_PLAN_BYTES) { diag_fault=13; goto done; }
+    if (physical!=(ULONG)plan || length!=plan_bytes) { diag_fault=13; goto done; }
     bus=physical|0xc0000000u;
     diag_stage=13;
     Forbid(); Disable();
@@ -195,79 +267,109 @@ static ULONG playback(struct Playback *p)
     diag_stage=14;
     Delay(1); wr(base,DMA_CS_RESET);
     if(!wait_dma_reset(base)) { diag_fault=6; goto done; }
+    wr(base,DMA_CS_INT|DMA_CS_END);
     diag_stage=15;
     { int prepared=prepare_audio(p->bvb);
       if(prepared) { diag_fault=15; if(prepared==21) poisoned=1; goto done; } }
     diag_stage=16;
     configured=1;
+    /* Interrupt server, before the first control block can complete. */
+    irq_id=dma_channel_irq(channel);
+    GIC400_Base=OpenLibrary((CONST_STRPTR)"gic400.library",1);
+    if(!irq_id || !GIC400_Base ||
+       (GIC400_Base->lib_Version==1 && GIC400_Base->lib_Revision<3)) {
+        diag_fault=HDMI_FAULT_IRQ_SETUP; goto done;
+    }
+    irq_sig=AllocSignal(-1);
+    if(irq_sig<0) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
+    p->ctx.count=p->ctx.stamp=p->ctx.error=p->ctx.calls=0;
+    p->ctx.base=base; p->ctx.task=FindTask(NULL); p->ctx.mask=1UL<<irq_sig;
+    p->irq.is_Node.ln_Type=NT_INTERRUPT; p->irq.is_Node.ln_Pri=0;
+    p->irq.is_Node.ln_Name=(char *)name;
+    p->irq.is_Data=&p->ctx; p->irq.is_Code=(void (*)())irq_handler;
+    if(AddIntServerEx(irq_id,0,FALSE,&p->irq)) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
+    irq_added=1;
+    diag_irq_id=irq_id;
     wr(base+0x20,7); wr(base+4,bus);
-    last_seen=rd(TIMER); wr(base,DMA_CS_START);
+    wr(base,DMA_CS_START);
     wr(CTRL,(2ul<<4)|(1ul<<12)|(1ul<<13)|ENABLE);
-    pcm_pacer_start(&pacer,last_seen);
+    wait_mask=(1UL<<irq_sig)|SIGBREAKF_CTRL_C|(1UL<<timer_port->mp_SigBit);
+    timer->tr_node.io_Command=TR_ADDREQUEST;
+    timer->tr_time.tv_secs=0; timer->tr_time.tv_micro=HDMI_WATCHDOG_US;
+    SendIO((struct IORequest *)timer); timer_pending=1;
     Forbid(); p->ready=1; p->error=AHIE_OK;
     if(p->process.waiter) Signal(p->process.waiter,p->process.wake);
     Permit();
     for (;;) {
-        int current;
-        unsigned late=0;
+        ULONG sigs, completed, now;
+        int slack;
+        diag_stage=29;
+        sigs=Wait(wait_mask);
         diag_stage=30;
-        ULONG duration;
-        if(p->stop_requested || (SetSignal(0,0)&SIGBREAKF_CTRL_C)) { result=AHIE_OK; break; }
+        ++wakes;
+        if(p->stop_requested || (sigs&SIGBREAKF_CTRL_C)) { result=AHIE_OK; break; }
+        if(sigs&(1UL<<timer_port->mp_SigBit)) {
+            WaitIO((struct IORequest *)timer); timer_pending=0;
+            if(p->ctx.count==last_count) {
+                diag_fault=HDMI_FAULT_IRQ_LOST; snapshot_failure(base);
+                fault_mai=rd(CTRL); fault_ramstatus=rd(RAMSTATUS); break;
+            }
+            last_count=p->ctx.count;
+            /* timer.device consumes tr_time: refill it before every re-arm. */
+            timer->tr_time.tv_secs=0; timer->tr_time.tv_micro=HDMI_WATCHDOG_US;
+            SendIO((struct IORequest *)timer); timer_pending=1;
+        }
+        if(p->ctx.error) {
+            diag_fault=HDMI_FAULT_DMA; fault_cs=p->ctx.error; fault_debug=rd(base+0x20);
+            fault_cb=rd(base+4); break;
+        }
         now=rd(TIMER);
-        if((ULONG)(now-last_seen)>max_gap) max_gap=now-last_seen;
-        {
-            ULONG observed_cs=rd(base), observed_debug=rd(base+0x20);
-            ULONG fault=hdmi_observation_fault(last_seen,now,observed_cs,observed_debug);
-            if(fault==HDMI_FAULT_GAP) {
-                late=1; last_resync_reason=HDMI_FAULT_GAP;
-            } else if(fault) {
-                diag_fault=fault; fault_cs=observed_cs; fault_debug=observed_debug;
-                fault_cb=rd(base+4); break;
+        completed=p->ctx.count;
+        if(sigs&(1UL<<irq_sig)) { ULONG lag=now-p->ctx.stamp; if(lag>max_gap) max_gap=lag; }
+        diag_irqs=completed;
+        for(;;) {
+            slack=ring_slack(completed,written,g->segs);
+            if(slack==RING_LAPPED) {
+                ++resync_count; last_resync_reason=HDMI_FAULT_GAP; last_resync_at=completed;
+                ring_resync(completed,&written,g->segs);
+                continue;
             }
-        }
-        current=stream_active_buffer(rd(base+4),bus);
-        if(current<0) continue;
-        last_seen=now;
-        ahi_refill_observe(&refill,&pacer,&p->pcm,current,late,now);
-        if(refill.pending && pacer.filled!=STREAM_BUFFER_FRAMES && !refill.resync) {
-            last_resync_reason=HDMI_FAULT_MIX_DEADLINE;
-            ahi_refill_defer(&refill,&pacer,&p->pcm,now);
-        }
-        if(!pcm_pacer_pump(&pacer,&p->pcm,staging,STREAM_BUFFER_FRAMES,
-                           now,next_pcm,p)) break;
-        if(refill.pending && pacer.filled==STREAM_BUFFER_FRAMES) {
-            int published=stream_publish(base,bus,plan,(unsigned)current^1u,staging,&duration);
-            if(published==2) {
-                /* No DMA memory was touched. Wait for a safe inactive half. */
-                if(!refill.resync) last_resync_reason=HDMI_FAULT_PUBLISH;
-                ahi_refill_defer(&refill,&pacer,&p->pcm,rd(TIMER));
-            } else if(published!=1) {
-                diag_fault=published<0?HDMI_FAULT_CACHE:HDMI_FAULT_PUBLISH;
-                snapshot_failure(base); break;
-            } else {
+            if(slack==0) { ULONG burst=rd(TIMER)-now; if(burst>max_burst) max_burst=burst; break; }
+            {
+                uint8_t *dest=plan+data_off+(written%g->segs)*seg_bytes;
+                int filled=fill_segment(p,dest,seg_bytes);
+                if(filled<=0) {
+                    if(filled<0) { diag_fault=HDMI_FAULT_CACHE; snapshot_failure(base); }
+                    else if(p->stop_requested) result=AHIE_OK;
+                    goto done;
+                }
                 ++total_refills;
-                if(refill.resync) ++resync_count;
-                ahi_refill_published(&refill,&pacer,&p->pcm,rd(TIMER));
+                completed=p->ctx.count;
+                /* The DMA reached this segment again while it was filled. */
+                if(completed-written>=g->segs) {
+                    ++resync_count; last_resync_reason=HDMI_FAULT_PUBLISH; last_resync_at=completed;
+                }
+                ++written;
             }
         }
-        timer->tr_node.io_Command=TR_ADDREQUEST;
-        timer->tr_time.tv_secs=0;
-        timer->tr_time.tv_micro=HDMI_POLL_US;
-        /* Synchronous request is completed before STOP cleanup can free it. */
-        if(DoIO((struct IORequest *)timer)) { diag_fault=HDMI_FAULT_TIMER_IO; break; }
     }
 done:
     diag_stage=40;
     if(configured) wr(CTRL,IDLE_CONTROL);
     if(channel>=0) quiet=stop_dma(channel,original_enable,cs[channel]);
+    /* Leave no INT flag behind a level triggered line, then drop the server. */
+    if(base) wr(base,DMA_CS_INT|DMA_CS_END);
+    if(irq_added) RemIntServerEx(irq_id,&p->irq);
     if(base) diag_dma=rd(base);
     diag_stage=41;
     if(configured && !restore_state(0)) { diag_fault=5; poisoned=1; result=AHIE_UNKNOWN; }
     if(configured) diag_ctrl=rd(CTRL);
     diag_stage=42;
-    if(staging) FreeMem(staging,STREAM_BUFFER_BYTES);
-    if(plan && quiet) { length=STREAM_PLAN_BYTES; CachePostDMA(plan,&length,DMA_ReadFromRAM); FreeMem(plan,STREAM_PLAN_BYTES); }
+    if(irq_sig>=0) FreeSignal(irq_sig);
+    if(GIC400_Base) { CloseLibrary(GIC400_Base); GIC400_Base=NULL; }
+    if(plan && quiet) { length=plan_bytes; CachePostDMA(plan,&length,DMA_ReadFromRAM); FreeMem(plan,plan_bytes); }
     if(!quiet) { diag_fault=6; poisoned=1; result=AHIE_UNKNOWN; }
+    if(timer_pending) { AbortIO((struct IORequest *)timer); WaitIO((struct IORequest *)timer); }
     if(timer_open) CloseDevice((struct IORequest *)timer);
     if(timer) DeleteIORequest((struct IORequest *)timer);
     if(timer_port) DeleteMsgPort(timer_port);
@@ -348,8 +450,8 @@ ULONG driver_start(ULONG flags,struct AHIAudioCtrlDrv *ctrl)
     p->pcm.hifi=(ctrl->ahiac_BuffType==AHIST_S32S);
     diag_mix_bits=p->pcm.hifi?32:16;
     diag_fault=0; diag_stage=2;
-    max_gap=total_refills=0;
-    resync_count=last_resync_reason=0;
+    max_gap=total_refills=wakes=diag_irqs=max_burst=0;
+    resync_count=last_resync_reason=last_resync_at=0;
     fault_cs=fault_debug=fault_cb=0;
     Forbid();
     p->ready=0; p->error=AHIE_UNKNOWN; p->stop_requested=0;
@@ -424,6 +526,14 @@ LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
     (void)arg; (void)ctrl;
     switch(attr) {
     case HDMI_QUERY_MIX_BITS: return diag_mix_bits;
+    case HDMI_QUERY_FEATURES: return 1; /* bit 0: interrupt driver */
+    case HDMI_QUERY_MAX_BURST: return max_burst;
+    case HDMI_QUERY_RESYNC_AT: return last_resync_at;
+    case HDMI_QUERY_FAULT_MAI: return fault_mai;
+    case HDMI_QUERY_FAULT_RAMSTATUS: return fault_ramstatus;
+    case HDMI_QUERY_IRQ_ID: return diag_irq_id;
+    case HDMI_QUERY_IRQS: return diag_irqs;
+    case HDMI_QUERY_WAKES: return wakes;
     case HDMI_QUERY_GAP: return max_gap;
     case HDMI_QUERY_FILLS: return total_refills;
     case HDMI_QUERY_RECOVERIES: return resync_count;
@@ -446,7 +556,8 @@ LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
         Permit();
         return state;
     }
-    default: return 0;
+    default:
+        return 0;
     }
 }
 extern void gw_init(void),gw_open(void),gw_close(void),gw_expunge(void),gw_null(void);

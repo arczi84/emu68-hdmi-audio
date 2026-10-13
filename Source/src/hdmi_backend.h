@@ -404,7 +404,7 @@ static int stop_dma(int channel, ULONG original_enable, ULONG original_cs)
  * Generation of samples and all waiting happen outside this critical section.
  * Returns 1 on success, 2 if no write was attempted (retry is safe),
  * 0 if a copy crossed its deadline, -1 on cache/address failure. */
-static int stream_publish(ULONG base, ULONG bus, uint8_t *plan, unsigned target,
+static __attribute__((unused)) int stream_publish(ULONG base, ULONG bus, uint8_t *plan, unsigned target,
                           const uint8_t *staging, ULONG *duration)
 {
     ULONG before, available, length, address, current;

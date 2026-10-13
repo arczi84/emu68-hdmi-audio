@@ -7,4 +7,5 @@
 #define STREAM_COPY_GUARD_BYTES 7680u
 #define STREAM_PUBLISH_LIMIT_US 20000u
 #define HDMI_POLL_US 1000u
+#define HDMI_WATCHDOG_US 250000u /* lost-interrupt watchdog, 4 Hz */
 #endif
