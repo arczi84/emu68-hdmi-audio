@@ -35,7 +35,7 @@ int main(void) {
     lib=(struct Library *)InitResident(r,seg);
     printf("Resident: %p version=%u negsize=%u\n",(void *)lib,lib ? lib->lib_Version:0,lib?lib->lib_NegSize:0);
     assert(lib && lib->lib_Version==4 && lib->lib_NegSize>=114);
-    assert(lib->lib_Revision==16);
+    assert(lib->lib_Revision==17);
     assert(test_open(lib)==lib);
     assert(lib->lib_OpenCnt==1);
     test_close(lib);

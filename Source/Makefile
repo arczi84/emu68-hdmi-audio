@@ -176,7 +176,7 @@ build/ahi_refill_test: ahi/refill_test.c ahi/refill.h ahi/pacing.h ahi/pcm.h ahi
 
 build/ahi_publish_impl.h: src/hdmi_backend.h
 	mkdir -p build
-	python3 -c 'from pathlib import Path; s=Path("src/hdmi_backend.h").read_text(); Path("$@").write_text(s[s.index("static int stream_publish("):])'
+	python3 -c 'from pathlib import Path; s=Path("src/hdmi_backend.h").read_text(); pos=s.index("int stream_publish("); Path("$@").write_text(s[s.rfind("static ",0,pos):])'
 
 build/ahi_publish_test: ahi/publish_test.c build/ahi_publish_impl.h ahi/buffering.h src/stream.h src/dma_control.h
 	$(CC) $(AHI_FLAGS) ahi/publish_test.c -o $@
