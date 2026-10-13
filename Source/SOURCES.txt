@@ -30,8 +30,10 @@ AHI SDK Drivers/MODE_ID reserves 0x1f for experimental drivers.
 The driver uses modes 0x001f0010 and 0x001f0011 in the experimental range.
 
 DMA interrupt (4.17):
-Public headers of gic400.library (MPL-2.0), copied unchanged into vendor/gic400:
-https://github.com/michalsc/Emu68 (gic400.library is built with the Emu68 tools)
+Git submodules at the repository root (headers and SFD files used by the build, MPL-2.0):
+devicetree.resource  https://github.com/michalsc/devicetree.resource  064095a749f72df8fa5165670a7ed16911a566c7
+mailbox.resource     https://github.com/michalsc/mailbox.resource     b6ed22dc7b46058d2a7454c34ce6dd27ab249449
+gic400.library       https://github.com/michalsc/gic400.library       b9b0b00376b72182c9e2d9834ab9383fbd24243c
 Legacy DMA channel interrupts: /soc/dma-controller@7e007000 in the device tree, GIC id = SPI + 32.
 AHI subdriver contract (PreTimer/PostTimer, AllocAudio/GetAttr tag lists): AHI developer archive 4.18,
 Developer/docs/ahi_sub.doc and Developer/drivers/paula/paula_audio.a.

@@ -1,7 +1,19 @@
 TOOLCHAIN ?=
 CC = $(if $(TOOLCHAIN),$(TOOLCHAIN)/)m68k-amigaos-gcc
-CFLAGS = -std=gnu99 -O2 -m68020 -Wall -Wextra -Werror -Iinclude
+SFDC = $(if $(TOOLCHAIN),$(TOOLCHAIN)/)sfdc
+CFLAGS = -std=gnu99 -O2 -m68020 -Wall -Wextra -Werror -Ibuild/include
 COPY_DIR ?= build/install
+
+# devicetree.resource and mailbox.resource are git submodules (../devicetree.resource, ../mailbox.resource): their SFD files
+# generate the C stubs (proto/, inline/, clib/) into build/include, with the sfdc of the amiga-gcc toolchain.
+# gic400.library (../gic400.library) ships its headers ready made. Initialise them with: git submodule update --init
+# (not --recursive: mailbox.resource has a devicetree.resource of its own, not needed here).
+GEN = build/include
+define gen_stubs
+$(shell mkdir -p $(GEN)/clib $(GEN)/proto $(GEN)/inline &&   $(SFDC) ../$(1).resource/sfd/$(1)_lib.sfd --mode=clib --output=$(GEN)/clib/$(1)_protos.h &&   $(SFDC) ../$(1).resource/sfd/$(1)_lib.sfd --mode=proto --output=$(GEN)/proto/$(1).h &&   $(SFDC) ../$(1).resource/sfd/$(1)_lib.sfd --mode=macros --output=$(GEN)/inline/$(1).h)
+endef
+$(if $(wildcard $(GEN)/proto/devicetree.h),,$(call gen_stubs,devicetree))
+$(if $(wildcard $(GEN)/proto/mailbox.h),,$(call gen_stubs,mailbox))
 
 .PHONY: all copy-exe test test-cli test-dma68k test-stream68k clean package
 all: copy-exe copy-ahi
@@ -58,7 +70,7 @@ clean:
 
 
 .PHONY: copy-ahi test-ahi package-ahi
-AHI_FLAGS = $(CFLAGS) -Ivendor/ahi -Ivendor/gic400
+AHI_FLAGS = $(CFLAGS) -Ivendor/ahi -I../gic400.library/include
 AHI_DEPS = ahi/ring.h ahi/refill.h ahi/pacing.h ahi/buffering.h ahi/watchdog.h ahi/guard.h ahi/status.h ahi/lifetime.h ahi/lifetime.c ahi/lifetime.S ahi/pcm.h src/hdmi_backend.h src/audio.h src/stream.h src/dma_control.h src/dma_plan.h src/clock_reply.h
 
 dist/emu68hdmi.audio: ahi/entry.S ahi/driver.c ahi/runtime.c $(AHI_DEPS)
