@@ -17,8 +17,8 @@ int main(void)
     WORD *pcm=NULL;
     int opened=0,result=20;
     ULONG i,error,cycle;
-    LONG options[3]={0};
-    struct RDArgs *args=ReadArgs((CONST_STRPTR)"RESTART/S,STALL/S,HIFI/S",options,NULL);
+    LONG options[4]={0};
+    struct RDArgs *args=ReadArgs((CONST_STRPTR)"RESTART/S,STALL/S,HIFI/S,LOW/S",options,NULL);
     struct TagItem tags[]={ {AHIA_AudioID,HDMI_MODE}, {AHIA_MixFreq,48000},
         {AHIA_Channels,1}, {AHIA_Sounds,1}, {TAG_DONE,0} };
     struct TagItem play[]={ {AHIC_Play,TRUE}, {TAG_DONE,0} };
@@ -26,6 +26,7 @@ int main(void)
     struct AHISampleInfo sample={AHIST_S16S,NULL,144000};
     if(!args) { PrintFault(IoErr(),(CONST_STRPTR)"HDMIAHITest"); return 20; }
     if(options[2]) tags[0].ti_Data=0x001f0011UL;
+    if(options[3]) tags[0].ti_Data+=2;  /* low latency twins: 001f0012 / 001f0013 */
     printf("HDMIAHITest 0.10 - direct AHI, mode %08x%s; RESTART = 3 START/STOP cycles\n",
         tags[0].ti_Data,options[2]?" HiFi":"");
     port=CreateMsgPort();

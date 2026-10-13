@@ -112,8 +112,17 @@ BPTR driver_close(struct DriverBase *base)
     if (base->lib.lib_OpenCnt) --base->lib.lib_OpenCnt;
     return base->lib.lib_Flags & LIBF_DELEXP ? driver_expunge(base) : 0;
 }
+/* Mode IDs 001f0010 / 001f0011 keep the long 2 x 96 ms ring of 4.16 (music,
+ * background playback); 001f0012 / 001f0013 use the low latency ring. The ID is the
+ * first tag AHI hands to AllocAudio and GetAttr (AHIDB_AudioID of the mode file). */
 static const struct ring_geom geom_long={RING_LONG_SEGS,RING_LONG_SEG_FRAMES};
-ULONG driver_alloc(struct AHIAudioCtrlDrv *ctrl)
+static const struct ring_geom geom_low={RING_LOW_SEGS,RING_LOW_SEG_FRAMES};
+static const struct ring_geom *mode_geom(struct TagItem *tags)
+{
+    ULONG id=tags?GetTagData(AHIDB_AudioID,0,tags):0;
+    return (id&0xffffUL)>=0x12UL?&geom_low:&geom_long;
+}
+ULONG driver_alloc(struct TagItem *tags,struct AHIAudioCtrlDrv *ctrl)
 {
     struct Playback *p;
     if (owner || poisoned || !(ctrl->ahiac_Flags & AHIACF_STEREO) ||
@@ -126,7 +135,7 @@ ULONG driver_alloc(struct AHIAudioCtrlDrv *ctrl)
         Permit(); FreeVec(p); return AHISF_ERROR;
     }
     AddSemaphore(&p->gate); owner=p; Permit();
-    ctrl->ahiac_DriverData=p; p->ctrl=ctrl; p->geom=&geom_long;
+    ctrl->ahiac_DriverData=p; p->ctrl=ctrl; p->geom=mode_geom(tags);
     io=0;
     if (!discover()) return AHISF_ERROR;
     /* Require the serialized resource in the driver; no direct mailbox fallback. */
@@ -304,6 +313,19 @@ static ULONG playback(struct Playback *p)
     if(AddIntServerEx(irq_id,0,FALSE,&p->irq)) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
     irq_added=1;
     diag_irq_id=irq_id;
+    /* The low latency ring is only 48 ms deep: the first run of the mixer (Emu68 translates its code
+     * on first use, ~30 ms) would lap it. Mix the whole ring before the DMA starts instead. The long ring
+     * keeps the 4.16 behaviour, which starts with silence and has 96 ms of margin. */
+    if(g==&geom_low) {
+        for(i=0;i<g->segs;++i) {
+            int filled=fill_segment(p,plan+data_off+i*seg_bytes,seg_bytes);
+            if(filled<=0) {
+                if(filled<0) diag_fault=HDMI_FAULT_CACHE;
+                else if(p->stop_requested) result=AHIE_OK;
+                goto done;
+            }
+        }
+    }
     wr(base+0x20,7); wr(base+4,bus);
     wr(base,DMA_CS_START);
     wr(CTRL,(2ul<<4)|(1ul<<12)|(1ul<<13)|ENABLE);
@@ -511,10 +533,12 @@ void driver_free(struct AHIAudioCtrlDrv *ctrl)
 }
 void driver_disable(void) { Forbid(); }
 void driver_enable(void) { Permit(); }
-LONG driver_attr(ULONG attr,LONG arg,LONG def,struct AHIAudioCtrlDrv *ctrl)
+LONG driver_attr(ULONG attr,LONG arg,LONG def,struct TagItem *tags,struct AHIAudioCtrlDrv *ctrl)
 {
     switch(attr) {
-    case AHIDB_Bits: return ctrl && (ctrl->ahiac_Flags&AHIACF_HIFI)?24:16;
+    case AHIDB_Bits:
+        /* The mode file says whether the mode is HiFi even when no control exists yet. */
+        return (ctrl && (ctrl->ahiac_Flags&AHIACF_HIFI)) || (tags && GetTagData(AHIDB_HiFi,0,tags))?24:16;
     case AHIDB_Frequencies: return 1;
     case AHIDB_Frequency: return arg==0 ? 48000 : def;
     case AHIDB_Index: return 0;
@@ -526,7 +550,11 @@ LONG driver_attr(ULONG attr,LONG arg,LONG def,struct AHIAudioCtrlDrv *ctrl)
      * Playback is unchanged from 4.13: this does NOT provide AHI's ~10 ms
      * realtime latency guarantee; the output still has ~192 ms latency. */
     case AHIDB_Realtime: return TRUE;
-    case AHIDB_MaxPlaySamples: return 3*STREAM_BUFFER_FRAMES+(ctrl?ctrl->ahiac_MaxBuffSamples:65535);
+    case AHIDB_MaxPlaySamples:
+    {   /* Frames AHI must keep ahead for dynamic samples: the ring plus the block in progress. */
+        const struct ring_geom *g=mode_geom(tags);
+        return (g->segs+1)*g->seg_frames+(ctrl?ctrl->ahiac_MaxBuffSamples:65535);
+    }
     case AHIDB_Outputs: return 1;
     case AHIDB_Output: return (LONG)"Raspberry Pi 4 HDMI0";
     case AHIDB_Inputs: return 0;
