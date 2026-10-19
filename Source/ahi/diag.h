@@ -62,6 +62,10 @@ static void hdmi_diag(struct Library *driver)
         ULONG volume=(ULONG)hdmi_status(driver,AHIC_OutputVolume_Query);
         printf("Master volume (AHIC_OutputVolume): %u.%03u (1.000 = unity)\n",volume>>16,(ULONG)(((volume&0xffffUL)*1000UL)>>16));
     }
+    if(hdmi_status(driver,HDMI_QUERY_FEATURES)&4) {
+        ULONG state=(ULONG)hdmi_status(driver,HDMI_QUERY_STATE);
+        printf("AHI clients: %u allocated, %u playing (up to 4 mixed together)\n",(state>>12)&7,(state>>16)&7);
+    }
     if(hdmi_status(driver,HDMI_QUERY_FEATURES)&1) {
         printf("IRQ: gic_id=%u completed=%u worker_wakes=%u (max_gap above: longest IRQ to worker delay)\n",
             (ULONG)hdmi_status(driver,HDMI_QUERY_IRQ_ID),(ULONG)hdmi_status(driver,HDMI_QUERY_IRQS),

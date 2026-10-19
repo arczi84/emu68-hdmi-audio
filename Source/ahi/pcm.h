@@ -148,4 +148,43 @@ static inline int pcm_fill(struct pcm_cursor *c,uint8_t *out,unsigned frames,
     }
     return 1;
 }
+
+/* Several AHI clients share one ring (4.18). Each client's blocks (S16S or S32S, through its own
+ * cursor, so a partly used block carries over to the next segment as with pcm_fill) are added into
+ * an accumulator of signed 24 bit samples: four full scale clients still fit in 32 bits. Returns 0
+ * when the provider stops; what was added so far stays in the accumulator. */
+#define PCM_MIX_MAX_CLIENTS 4u
+static inline int pcm_mix(struct pcm_cursor *c,int32_t *acc,unsigned frames,
+                          pcm_provider provider,void *context)
+{
+    while(frames) {
+        unsigned n,i;
+        if(c->position==c->count) {
+            if(!provider(context,&c->samples,&c->count) || !c->samples || !c->count) return 0;
+            c->position=0;
+        }
+        n=c->count-c->position;
+        if(n>frames) n=frames;
+        if(c->hifi) {
+            const int32_t *in=(const int32_t *)c->samples+c->position*2u;
+            for(i=0;i<n*2u;++i) acc[i]+=in[i]>>8;
+        } else {
+            const int16_t *in=(const int16_t *)c->samples+c->position*2u;
+            for(i=0;i<n*2u;++i) acc[i]+=(int32_t)in[i]*256;
+        }
+        c->position+=n; acc+=n*2u; frames-=n;
+    }
+    return 1;
+}
+/* Saturates the sum to 24 bits and stores it as full scale S32S, so that pcm_pack with hifi=1 packs it.
+ * With a single client this gives the same IEC958 words as packing that client directly. */
+static inline void pcm_mix_finish(int32_t *acc,unsigned samples)
+{
+    unsigned i;
+    for(i=0;i<samples;++i) {
+        int32_t v=acc[i];
+        if(v>0x7fffff) v=0x7fffff; else if(v<-0x800000) v=-0x800000;
+        acc[i]=(int32_t)((uint32_t)v<<8);
+    }
+}
 #endif

@@ -1,8 +1,8 @@
-emu68hdmi.audio 4.17
+emu68hdmi.audio 4.18
 ==========================
 AHI HDMI subdriver for PiStorm with Raspberry Pi 4 and Emu68.
 Requires AHI 6.x (tested with 6.6). Tested with Emu68 1.1; implements the AHI V4 subdriver ABI.
-Version 4.17 is the driver version, not the version of AHI.
+Version 4.18 is the driver version, not the version of AHI.
 
 FEATURES
 - Stereo output at 48000 Hz through HDMI0.
@@ -25,8 +25,8 @@ Compatibility with every game or application has not been established.
 
 The long DMA ring has two 96 ms segments and starts with approximately 192 ms
 of silence; the low latency ring has three 16 ms segments. Heavy CPU stalls can cause repeated audio during recovery.
-Only one client can own HDMI at a time; selecting HDMI in several Units
-does not enable simultaneous use. Recording and Paula redirection are
+Up to four AHI clients can play at once (4.18); they are mixed into one
+HDMI stream. Recording and Paula redirection are
 not supported. HiFi mode increases mixing cost and must be selected
 explicitly. Mode visibility does not imply a 10 ms latency guarantee.
 

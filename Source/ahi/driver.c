@@ -34,21 +34,42 @@ struct irq_ctx {
     ULONG base, mask;
     struct Task *task;
 };
-struct Playback {
+/* 4.18: up to PCM_MIX_MAX_CLIENTS AHI audio controls play at once (a game and a CD player, ...).
+ * Each one is a Client with its own mix buffer and PCM cursor; the HDMI setup, the DMA ring, the
+ * interrupt and the worker process are shared (struct Hardware). The worker sums the clients into
+ * one 24 bit accumulator per segment (pcm_mix) and packs it with the master gain. The hardware
+ * starts with the first client that plays and stops when the last one stops. */
+struct Client {
+    struct AHIAudioCtrlDrv *ctrl;
+    const struct ring_geom *geom;       /* of the client's mode, used when it starts the hardware */
+    ULONG mix_bytes, skip_mix;
+    void *mix;
+    uint8_t *mix_storage;
+    struct pcm_cursor pcm;              /* input side only: block, position, hifi */
+    /* active: the worker may mix it; busy: the worker is inside its hooks or buffer (set/cleared
+     * under Forbid). STOP clears active and waits for busy=0 before the buffer is freed. */
+    volatile ULONG active, busy, stop_requested, failed;
+    struct Task *waiter;
+    ULONG wake;
+};
+struct Hardware {
     struct Interrupt irq;
     struct irq_ctx ctx;
-    struct SignalSemaphore gate;
-    struct AHIAudioCtrlDrv *ctrl;
+    struct SignalSemaphore gate;        /* "HDMITest.hardware" while any client is allocated */
     struct hdmi_process process;
     volatile ULONG command, running, stop_requested;
     const struct ring_geom *geom;
-    ULONG error, bvb, mix_bytes, skip_mix;
-    void *mix;
-    uint8_t *mix_storage;
-    struct pcm_cursor pcm;
+    ULONG error, bvb;
+    int32_t *acc;                       /* seg_frames stereo frames, 24 bit sums */
+    ULONG acc_bytes;
+    struct pcm_cursor out;              /* packs acc: IEC958 frame counter and master gain ramp */
+    struct Client *clients[PCM_MIX_MAX_CLIENTS];
+    unsigned nclients;                  /* allocated controls; slots change under api_lock + Forbid */
     volatile ULONG ready;
 };
-static struct Playback *owner;
+static struct Hardware hw;
+/* Serialises AllocAudio / FreeAudio / Start / Stop of all clients (task context only). */
+static struct SignalSemaphore api_lock;
 static int poisoned;
 static volatile ULONG diag_stage,diag_fault,diag_ctrl,diag_dma,diag_result;
 static volatile ULONG max_gap,total_refills;
@@ -69,8 +90,8 @@ static void snapshot_failure(ULONG base) {
 }
 static LONG worker_entry(void);
 static const char name[] = "emu68hdmi.audio";
-static const char ident[] = "emu68hdmi.audio 4.17 (13.10.2026)\r\n";
-const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.17 (13.10.2026)";
+static const char ident[] = "emu68hdmi.audio 4.18 (19.10.2026)\r\n";
+const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.18 (19.10.2026)";
 
 struct DriverBase *driver_init(struct DriverBase *base, BPTR segment, struct ExecBase *exec)
 {
@@ -87,7 +108,9 @@ struct DriverBase *driver_init(struct DriverBase *base, BPTR segment, struct Exe
     base->lib.lib_Node.ln_Type=NT_LIBRARY;
     base->lib.lib_Node.ln_Name=(char *)name;
     base->lib.lib_Flags=LIBF_SUMUSED|LIBF_CHANGED;
-    base->lib.lib_Version=4; base->lib.lib_Revision=17;
+    base->lib.lib_Version=4; base->lib.lib_Revision=18;
+    InitSemaphore(&api_lock);
+    InitSemaphore(&hw.gate); hw.gate.ss_Link.ln_Name="HDMITest.hardware";
     base->lib.lib_IdString=(APTR)ident;
     return base;
 }
@@ -100,7 +123,7 @@ struct DriverBase *driver_open(struct DriverBase *base)
 BPTR driver_expunge(struct DriverBase *base)
 {
     BPTR segment;
-    if (base->lib.lib_OpenCnt || owner || poisoned) {
+    if (base->lib.lib_OpenCnt || hw.nclients || poisoned) {
         base->lib.lib_Flags |= LIBF_DELEXP; return 0;
     }
     segment=base->segment;
@@ -125,39 +148,50 @@ static const struct ring_geom *mode_geom(struct TagItem *tags)
     ULONG id=tags?GetTagData(AHIDB_AudioID,0,tags):0;
     return (id&0xffffUL)>=0x12UL?&geom_low:&geom_long;
 }
+/* The first client claims the hardware semaphore and discovers HDMI; later ones share it. A failed
+ * discovery still registers the client: AHI calls FreeAudio, which must release it. */
 ULONG driver_alloc(struct TagItem *tags,struct AHIAudioCtrlDrv *ctrl)
 {
-    struct Playback *p;
-    if (owner || poisoned || !(ctrl->ahiac_Flags & AHIACF_STEREO) ||
+    struct Client *c;
+    ULONG result=AHISF_ERROR;
+    if (poisoned || !(ctrl->ahiac_Flags & AHIACF_STEREO) ||
         (ctrl->ahiac_Flags & (AHIACF_MULTICHANNEL|AHIACF_RECORD))) return AHISF_ERROR;
-    p=AllocVec(sizeof(*p),MEMF_PUBLIC|MEMF_CLEAR);
-    if (!p) return AHISF_ERROR;
-    InitSemaphore(&p->gate); p->gate.ss_Link.ln_Name="HDMITest.hardware";
+    c=AllocVec(sizeof(*c),MEMF_PUBLIC|MEMF_CLEAR);
+    if (!c) return AHISF_ERROR;
+    ObtainSemaphore(&api_lock);
     Forbid();
-    if (owner || FindSemaphore((CONST_STRPTR)"HDMITest.hardware")) {
-        Permit(); FreeVec(p); return AHISF_ERROR;
+    if (hw.nclients>=PCM_MIX_MAX_CLIENTS ||
+        (!hw.nclients && FindSemaphore((CONST_STRPTR)"HDMITest.hardware"))) {
+        Permit(); ReleaseSemaphore(&api_lock); FreeVec(c); return AHISF_ERROR;
     }
-    AddSemaphore(&p->gate); owner=p; Permit();
-    ctrl->ahiac_DriverData=p; p->ctrl=ctrl; p->geom=mode_geom(tags);
-    io=0;
-    if (!discover()) return AHISF_ERROR;
-    /* Require the serialized resource in the driver; no direct mailbox fallback. */
-    MailboxBase=OpenResource((CONST_STRPTR)"mailbox.resource");
-    if (!MailboxBase || ((struct Library *)MailboxBase)->lib_NegSize<6) return AHISF_ERROR;
-    p->bvb=query_bvb();
-    if (!p->bvb) return AHISF_ERROR;
-    ctrl->ahiac_MixFreq=48000;
-    return AHISF_MIXING|AHISF_TIMING|AHISF_KNOWSTEREO|AHISF_KNOWHIFI;
+    if (!hw.nclients) AddSemaphore(&hw.gate);
+    hw.clients[hw.nclients++]=c;
+    Permit();
+    ctrl->ahiac_DriverData=c; c->ctrl=ctrl; c->geom=mode_geom(tags);
+    if (!hw.bvb) {
+        io=0;
+        /* Require the serialized resource in the driver; no direct mailbox fallback. */
+        if (discover()) {
+            MailboxBase=OpenResource((CONST_STRPTR)"mailbox.resource");
+            if (MailboxBase && ((struct Library *)MailboxBase)->lib_NegSize>=6) hw.bvb=query_bvb();
+        }
+    }
+    if (hw.bvb) {
+        ctrl->ahiac_MixFreq=48000;
+        result=AHISF_MIXING|AHISF_TIMING|AHISF_KNOWSTEREO|AHISF_KNOWHIFI;
+    }
+    ReleaseSemaphore(&api_lock);
+    return result;
 }
 
 /* Preserve partially consumed AHI blocks across hardware DMA boundaries. AHI
  * owns BuffSamples: never replace it with our fixed hardware buffer size. */
 static int next_pcm(void *context,const void **samples,unsigned *count)
 {
-    struct Playback *p=context;
+    struct Client *p=context;
     struct AHIAudioCtrlDrv *c=p->ctrl;
     Forbid();
-    if(p->stop_requested) { Permit(); return 0; }
+    if(p->stop_requested || !p->active) { Permit(); return 0; }
     diag_stage=20;
     if(!pcm_guard_ok(p->mix_storage,p->mix_bytes)) { diag_fault=1; Permit(); return 0; }
     CallHookPkt(c->ahiac_PlayerFunc,c,NULL);
@@ -173,27 +207,47 @@ static int next_pcm(void *context,const void **samples,unsigned *count)
     Permit();
     return 1;
 }
-/* Fills one free ring segment with AHI audio. Returns 1 on success, 0 if the PCM source stopped (STOP or
- * a hook fault, diag_fault says which), -1 on a cache/address failure. The conversion goes straight into the
- * DMA segment: no staging buffer and no Disable(). AHI's CPU overload protection (V4) is one Pre/PostTimer
- * pair around each refill burst, as paula.audio does; when AHI asks to skip, the Player hook still runs but
- * the mixer is replaced by silence. */
-static int fill_segment(struct Playback *p,uint8_t *dest,ULONG seg_bytes)
+/* Fills one free ring segment: every active client is mixed into the accumulator, which is then
+ * packed straight into the DMA segment (no Disable()). Returns 1, or -1 on a cache/address failure.
+ * AHI's CPU overload protection (V4) is one Pre/PostTimer pair per client around its part of the
+ * refill, as paula.audio does; when AHI asks to skip, that client's Player hook still runs but its
+ * mixer is replaced by silence. A client whose hooks fail (diag_fault says why) is muted until its
+ * next START; the others keep playing. */
+static int fill_segment(uint8_t *dest,ULONG seg_bytes)
 {
-    struct AHIAudioCtrlDrv *actrl=p->ctrl;
+    const unsigned frames=hw.geom->seg_frames;
     ULONG length=seg_bytes,address;
-    int filled;
+    unsigned i;
     CachePostDMA(dest,&length,DMA_ReadFromRAM);
-    p->skip_mix=0;
-    if(actrl->ahiac_PreTimer) {
-        p->skip_mix=(hdmi_call_timer((APTR)actrl->ahiac_PreTimer,actrl)&0xffffUL)!=0;
-        ++pre_calls;
-        if(p->skip_mix) ++pre_skips;
+    memset(hw.acc,0,frames*8u);
+    for(i=0;i<PCM_MIX_MAX_CLIENTS;++i) {
+        struct Client *c;
+        struct AHIAudioCtrlDrv *actrl;
+        int ok;
+        Forbid();
+        c=hw.clients[i];
+        if(!c || !c->active || c->failed) { Permit(); continue; }
+        c->busy=1;
+        Permit();
+        actrl=c->ctrl;
+        c->skip_mix=0;
+        if(actrl->ahiac_PreTimer) {
+            c->skip_mix=(hdmi_call_timer((APTR)actrl->ahiac_PreTimer,actrl)&0xffffUL)!=0;
+            ++pre_calls;
+            if(c->skip_mix) ++pre_skips;
+        }
+        ok=pcm_mix(&c->pcm,hw.acc,frames,next_pcm,c);
+        if(actrl->ahiac_PostTimer) hdmi_call_timer((APTR)actrl->ahiac_PostTimer,actrl);
+        Forbid();
+        if(!ok && !c->stop_requested && c->active) c->failed=1;
+        c->busy=0;
+        if(c->waiter) Signal(c->waiter,c->wake);
+        Permit();
     }
-    p->pcm.gain_target=master_gain;
-    filled=pcm_fill(&p->pcm,dest,p->geom->seg_frames,next_pcm,p);
-    if(actrl->ahiac_PostTimer) hdmi_call_timer((APTR)actrl->ahiac_PostTimer,actrl);
-    if(!filled) return 0;
+    pcm_mix_finish(hw.acc,frames*2u);
+    hw.out.gain_target=master_gain;
+    hw.out.samples=hw.acc; hw.out.position=0; hw.out.count=frames;
+    pcm_pack(&hw.out,dest,frames);
     length=seg_bytes;
     address=(ULONG)CachePreDMA(dest,&length,DMA_ReadFromRAM);
     if(length!=seg_bytes || address!=(ULONG)dest) return -1;
@@ -239,9 +293,9 @@ static ULONG dma_channel_irq(int channel)
     }
     return irq;
 }
-static ULONG playback(struct Playback *p)
+static ULONG playback(void)
 {
-    const struct ring_geom *g=p->geom;
+    const struct ring_geom *g=hw.geom;
     const ULONG seg_bytes=ring_seg_bytes(g),data_off=ring_data_offset(g),plan_bytes=ring_plan_bytes(g);
     uint8_t *plan=NULL;
     struct MsgPort *timer_port=NULL;
@@ -254,7 +308,7 @@ static ULONG playback(struct Playback *p)
     BYTE irq_sig=-1;
     ULONG result=AHIE_UNKNOWN;
     unsigned i;
-    if(p->stop_requested) return AHIE_OK;
+    if(hw.stop_requested) return AHIE_OK;
     diag_stage=9;
     /* The only timer left is a watchdog for a lost interrupt, 4 Hz. */
     timer_port=CreateMsgPort();
@@ -296,7 +350,7 @@ static ULONG playback(struct Playback *p)
     if(!wait_dma_reset(base)) { diag_fault=6; goto done; }
     wr(base,DMA_CS_INT|DMA_CS_END);
     diag_stage=15;
-    { int prepared=prepare_audio(p->bvb);
+    { int prepared=prepare_audio(hw.bvb);
       if(prepared) { diag_fault=15; if(prepared==21) poisoned=1; goto done; } }
     diag_stage=16;
     configured=1;
@@ -309,12 +363,12 @@ static ULONG playback(struct Playback *p)
     }
     irq_sig=AllocSignal(-1);
     if(irq_sig<0) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
-    p->ctx.count=p->ctx.stamp=p->ctx.error=p->ctx.calls=0;
-    p->ctx.base=base; p->ctx.task=FindTask(NULL); p->ctx.mask=1UL<<irq_sig;
-    p->irq.is_Node.ln_Type=NT_INTERRUPT; p->irq.is_Node.ln_Pri=0;
-    p->irq.is_Node.ln_Name=(char *)name;
-    p->irq.is_Data=&p->ctx; p->irq.is_Code=(void (*)())irq_handler;
-    if(AddIntServerEx(irq_id,0,FALSE,&p->irq)) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
+    hw.ctx.count=hw.ctx.stamp=hw.ctx.error=hw.ctx.calls=0;
+    hw.ctx.base=base; hw.ctx.task=FindTask(NULL); hw.ctx.mask=1UL<<irq_sig;
+    hw.irq.is_Node.ln_Type=NT_INTERRUPT; hw.irq.is_Node.ln_Pri=0;
+    hw.irq.is_Node.ln_Name=(char *)name;
+    hw.irq.is_Data=&hw.ctx; hw.irq.is_Code=(void (*)())irq_handler;
+    if(AddIntServerEx(irq_id,0,FALSE,&hw.irq)) { diag_fault=HDMI_FAULT_IRQ_SETUP; goto done; }
     irq_added=1;
     diag_irq_id=irq_id;
     /* The low latency ring is only 48 ms deep: the first run of the mixer (Emu68 translates its code
@@ -322,12 +376,8 @@ static ULONG playback(struct Playback *p)
      * keeps the 4.16 behaviour, which starts with silence and has 96 ms of margin. */
     if(g==&geom_low) {
         for(i=0;i<g->segs;++i) {
-            int filled=fill_segment(p,plan+data_off+i*seg_bytes,seg_bytes);
-            if(filled<=0) {
-                if(filled<0) diag_fault=HDMI_FAULT_CACHE;
-                else if(p->stop_requested) result=AHIE_OK;
-                goto done;
-            }
+            if(hw.stop_requested) { result=AHIE_OK; goto done; }
+            if(fill_segment(plan+data_off+i*seg_bytes,seg_bytes)<0) { diag_fault=HDMI_FAULT_CACHE; goto done; }
         }
     }
     wr(base+0x20,7); wr(base+4,bus);
@@ -337,8 +387,8 @@ static ULONG playback(struct Playback *p)
     timer->tr_node.io_Command=TR_ADDREQUEST;
     timer->tr_time.tv_secs=0; timer->tr_time.tv_micro=HDMI_WATCHDOG_US;
     SendIO((struct IORequest *)timer); timer_pending=1;
-    Forbid(); p->ready=1; p->error=AHIE_OK;
-    if(p->process.waiter) Signal(p->process.waiter,p->process.wake);
+    Forbid(); hw.ready=1; hw.error=AHIE_OK;
+    if(hw.process.waiter) Signal(hw.process.waiter,hw.process.wake);
     Permit();
     for (;;) {
         ULONG sigs, completed, now;
@@ -347,25 +397,25 @@ static ULONG playback(struct Playback *p)
         sigs=Wait(wait_mask);
         diag_stage=30;
         ++wakes;
-        if(p->stop_requested || (sigs&SIGBREAKF_CTRL_C)) { result=AHIE_OK; break; }
+        if(hw.stop_requested || (sigs&SIGBREAKF_CTRL_C)) { result=AHIE_OK; break; }
         if(sigs&(1UL<<timer_port->mp_SigBit)) {
             WaitIO((struct IORequest *)timer); timer_pending=0;
-            if(p->ctx.count==last_count) {
+            if(hw.ctx.count==last_count) {
                 diag_fault=HDMI_FAULT_IRQ_LOST; snapshot_failure(base);
                 fault_mai=rd(CTRL); fault_ramstatus=rd(RAMSTATUS); break;
             }
-            last_count=p->ctx.count;
+            last_count=hw.ctx.count;
             /* timer.device consumes tr_time: refill it before every re-arm. */
             timer->tr_time.tv_secs=0; timer->tr_time.tv_micro=HDMI_WATCHDOG_US;
             SendIO((struct IORequest *)timer); timer_pending=1;
         }
-        if(p->ctx.error) {
-            diag_fault=HDMI_FAULT_DMA; fault_cs=p->ctx.error; fault_debug=rd(base+0x20);
+        if(hw.ctx.error) {
+            diag_fault=HDMI_FAULT_DMA; fault_cs=hw.ctx.error; fault_debug=rd(base+0x20);
             fault_cb=rd(base+4); break;
         }
         now=rd(TIMER);
-        completed=p->ctx.count;
-        if(sigs&(1UL<<irq_sig)) { ULONG lag=now-p->ctx.stamp; if(lag>max_gap) max_gap=lag; }
+        completed=hw.ctx.count;
+        if(sigs&(1UL<<irq_sig)) { ULONG lag=now-hw.ctx.stamp; if(lag>max_gap) max_gap=lag; }
         diag_irqs=completed;
         for(;;) {
             slack=ring_slack(completed,written,g->segs);
@@ -377,14 +427,10 @@ static ULONG playback(struct Playback *p)
             if(slack==0) { ULONG burst=rd(TIMER)-now; if(burst>max_burst) max_burst=burst; break; }
             {
                 uint8_t *dest=plan+data_off+(written%g->segs)*seg_bytes;
-                int filled=fill_segment(p,dest,seg_bytes);
-                if(filled<=0) {
-                    if(filled<0) { diag_fault=HDMI_FAULT_CACHE; snapshot_failure(base); }
-                    else if(p->stop_requested) result=AHIE_OK;
-                    goto done;
-                }
+                if(hw.stop_requested) { result=AHIE_OK; goto done; }
+                if(fill_segment(dest,seg_bytes)<0) { diag_fault=HDMI_FAULT_CACHE; snapshot_failure(base); goto done; }
                 ++total_refills;
-                completed=p->ctx.count;
+                completed=hw.ctx.count;
                 /* The DMA reached this segment again while it was filled. */
                 if(completed-written>=g->segs) {
                     ++resync_count; last_resync_reason=HDMI_FAULT_PUBLISH; last_resync_at=completed;
@@ -399,7 +445,7 @@ done:
     if(channel>=0) quiet=stop_dma(channel,original_enable,cs[channel]);
     /* Leave no INT flag behind a level triggered line, then drop the server. */
     if(base) wr(base,DMA_CS_INT|DMA_CS_END);
-    if(irq_added) RemIntServerEx(irq_id,&p->irq);
+    if(irq_added) RemIntServerEx(irq_id,&hw.irq);
     if(base) diag_dma=rd(base);
     diag_stage=41;
     if(configured && !restore_state(0)) { diag_fault=5; poisoned=1; result=AHIE_UNKNOWN; }
@@ -417,29 +463,51 @@ done:
     return result;
 }
 /* STOP acknowledges an idle worker, not a process exit. DOS termination is
- * reserved for FreeAudio and acknowledged through NP_ExitCode. */
+ * reserved for the last FreeAudio and acknowledged through NP_ExitCode. */
 static LONG worker_entry(void)
 {
-    struct Playback *p=FindTask(NULL)->tc_UserData;
     for(;;) {
         ULONG command,result;
         Forbid();
-        while(!p->command) { diag_stage=50; Wait(SIGBREAKF_CTRL_D); }
-        command=p->command; p->command=0;
+        while(!hw.command) { diag_stage=50; Wait(SIGBREAKF_CTRL_D); }
+        command=hw.command; hw.command=0;
         Permit();
         if(command==2) { diag_stage=62; return 0; }
         SetSignal(0,SIGBREAKF_CTRL_C);
-        /* Same playback lifetime as 4.7: one run per AHI START. Re-entering
-         * playback after a deadline fault is disabled while investigating
-         * the Wipeout regression reported with 4.10. Preserve the fault. */
-        result=playback(p);
+        /* One playback run per hardware start (first client START). */
+        result=playback();
         Forbid();
-        p->error=result; p->running=0;
-        if(p->process.waiter) Signal(p->process.waiter,p->process.wake);
+        hw.error=result; hw.running=0;
+        if(hw.process.waiter) Signal(hw.process.waiter,hw.process.wake);
         Permit();
-        /* After the acknowledgement, do not touch PCM or the AHI control
-         * until START supplies a fresh buffer and wakes this worker. */
+        /* After the acknowledgement, do not touch PCM or any AHI control
+         * until a START restarts the hardware and wakes this worker. */
     }
+}
+/* Stops the shared hardware (caller holds api_lock, no client active). */
+static void hw_stop(void)
+{
+    BYTE signal=AllocSignal(-1);
+    Forbid();
+    hw.stop_requested=1;
+    hw.process.waiter=signal>=0?FindTask(NULL):NULL;
+    hw.process.wake=signal>=0?1UL<<signal:0;
+    if(hw.running && hw.process.task)
+        Signal((struct Task *)hw.process.task,SIGBREAKF_CTRL_C);
+    while(hw.running) {
+        if(signal>=0) Wait(hw.process.wake); else Delay(1);
+    }
+    hw.process.waiter=NULL;
+    Permit();
+    if(signal>=0) FreeSignal(signal);
+    if(hw.acc) FreeVec(hw.acc);
+    hw.acc=NULL; hw.acc_bytes=0;
+}
+static int any_active(void)
+{
+    unsigned i;
+    for(i=0;i<hw.nclients;++i) if(hw.clients[i]->active) return 1;
+    return 0;
 }
 /* GCC 6.5.0b miscompiles a bit test of the nonvolatile stack argument:
  * btst #232,8(a5) tests the high byte instead of PLAY in the low byte.
@@ -448,95 +516,128 @@ static LONG worker_entry(void)
  * -66 vector regression test: STOP must set stop_requested for flags=1. */
 void driver_stop(volatile ULONG flags,struct AHIAudioCtrlDrv *ctrl)
 {
-    struct Playback *p=ctrl->ahiac_DriverData;
+    struct Client *c=ctrl->ahiac_DriverData;
     BYTE signal;
-    if(!p || !(flags&AHISF_PLAY)) return;
+    if(!c || !(flags&AHISF_PLAY)) return;
+    ObtainSemaphore(&api_lock);
     signal=AllocSignal(-1);
     Forbid();
-    p->stop_requested=1;
-    p->process.waiter=signal>=0?FindTask(NULL):NULL;
-    p->process.wake=signal>=0?1UL<<signal:0;
-    if(p->running && p->process.task)
-        Signal((struct Task *)p->process.task,SIGBREAKF_CTRL_C);
-    while(p->running) {
-        if(signal>=0) Wait(p->process.wake); else Delay(1);
+    c->stop_requested=1; c->active=0;
+    c->waiter=signal>=0?FindTask(NULL):NULL;
+    c->wake=signal>=0?1UL<<signal:0;
+    while(c->busy) {
+        if(signal>=0) Wait(c->wake); else Delay(1);
     }
-    p->process.waiter=NULL;
+    c->waiter=NULL;
     Permit();
     if(signal>=0) FreeSignal(signal);
-    if(p->mix_storage) FreeVec(p->mix_storage);
-    p->mix_storage=NULL;
-    p->mix=NULL; memset(&p->pcm,0,sizeof(p->pcm));
+    if(!any_active()) hw_stop();
+    if(c->mix_storage) FreeVec(c->mix_storage);
+    c->mix_storage=NULL;
+    c->mix=NULL; memset(&c->pcm,0,sizeof(c->pcm));
+    ReleaseSemaphore(&api_lock);
 }
 ULONG driver_start(ULONG flags,struct AHIAudioCtrlDrv *ctrl)
 {
-    struct Playback *p=ctrl->ahiac_DriverData;
-    ULONG result;
-    BYTE signal;
+    struct Client *c=ctrl->ahiac_DriverData;
+    ULONG result=AHIE_OK;
     diag_stage=1;
-    if(!p || poisoned || (flags&AHISF_RECORD)) return AHIE_UNKNOWN;
+    if(!c || poisoned || (flags&AHISF_RECORD)) return AHIE_UNKNOWN;
     if(!(flags&AHISF_PLAY)) return AHIE_OK;
     driver_stop(AHISF_PLAY,ctrl);
     if((ctrl->ahiac_BuffType!=AHIST_S16S && ctrl->ahiac_BuffType!=AHIST_S32S) || !ctrl->ahiac_BuffSize ||
-        !ctrl->ahiac_PlayerFunc || !ctrl->ahiac_MixerFunc) return AHIE_UNKNOWN;
-    signal=AllocSignal(-1);
-    if(signal<0) return AHIE_NOMEM;
-    p->mix_bytes=ctrl->ahiac_BuffSize;
-    if(p->mix_bytes>0x100000UL) { FreeSignal(signal); diag_fault=1; return AHIE_UNKNOWN; }
-    p->mix_storage=AllocVec(p->mix_bytes+2*PCM_GUARD_BYTES,MEMF_PUBLIC|MEMF_CLEAR);
-    if(!p->mix_storage) { FreeSignal(signal); return AHIE_NOMEM; }
-    pcm_guard_init(p->mix_storage,p->mix_bytes);
-    p->mix=p->mix_storage+PCM_GUARD_BYTES;
-    p->pcm.hifi=(ctrl->ahiac_BuffType==AHIST_S32S);
-    /* Start at the master gain set now, not at unity: no swell when playback starts */
-    p->pcm.gain_enable=1; p->pcm.gain_target=master_gain; p->pcm.gain_goal=master_gain;
-    p->pcm.gain_cur=(int)(master_gain>>1)<<15; p->pcm.gain_step=0; p->pcm.ramp=0; p->pcm.gain_init=1;
-    diag_mix_bits=p->pcm.hifi?32:16;
-    diag_fault=0; diag_stage=2;
-    max_gap=total_refills=wakes=diag_irqs=max_burst=pre_calls=pre_skips=0;
-    resync_count=last_resync_reason=last_resync_at=0;
-    fault_cs=fault_debug=fault_cb=0;
-    Forbid();
-    p->ready=0; p->error=AHIE_UNKNOWN; p->stop_requested=0;
-    p->running=1; p->command=1;
-    p->process.waiter=FindTask(NULL); p->process.wake=1UL<<signal;
-    if(p->process.task) Signal((struct Task *)p->process.task,SIGBREAKF_CTRL_D);
-    else if(!hdmi_spawn(&p->process,worker_entry,p)) {
-        diag_fault=16; p->running=0; p->command=0;
+        !ctrl->ahiac_PlayerFunc || !ctrl->ahiac_MixerFunc || !hw.bvb) return AHIE_UNKNOWN;
+    ObtainSemaphore(&api_lock);
+    c->mix_bytes=ctrl->ahiac_BuffSize;
+    if(c->mix_bytes>0x100000UL) { diag_fault=1; ReleaseSemaphore(&api_lock); return AHIE_UNKNOWN; }
+    c->mix_storage=AllocVec(c->mix_bytes+2*PCM_GUARD_BYTES,MEMF_PUBLIC|MEMF_CLEAR);
+    if(!c->mix_storage) { ReleaseSemaphore(&api_lock); return AHIE_NOMEM; }
+    pcm_guard_init(c->mix_storage,c->mix_bytes);
+    c->mix=c->mix_storage+PCM_GUARD_BYTES;
+    c->pcm.hifi=(ctrl->ahiac_BuffType==AHIST_S32S);
+    c->stop_requested=0; c->failed=0;
+    diag_mix_bits=c->pcm.hifi?32:16;
+    if(hw.running) {
+        /* The hardware already plays for another client: join at the next segment. */
+        Forbid(); c->active=1; Permit();
+    } else {
+        BYTE signal=AllocSignal(-1);
+        const struct ring_geom *g=c->geom;
+        if(signal<0) { ReleaseSemaphore(&api_lock); driver_stop(AHISF_PLAY,ctrl); return AHIE_NOMEM; }
+        /* A run that ended on a fault (no STOP) left its accumulator behind. */
+        if(hw.acc) FreeVec(hw.acc);
+        hw.geom=g;
+        hw.acc_bytes=g->seg_frames*8u;
+        hw.acc=AllocVec(hw.acc_bytes,MEMF_PUBLIC|MEMF_CLEAR);
+        if(!hw.acc) { FreeSignal(signal); ReleaseSemaphore(&api_lock); driver_stop(AHISF_PLAY,ctrl); return AHIE_NOMEM; }
+        memset(&hw.out,0,sizeof(hw.out));
+        hw.out.hifi=1;
+        /* Start at the master gain set now, not at unity: no swell when playback starts */
+        hw.out.gain_enable=1; hw.out.gain_target=master_gain; hw.out.gain_goal=master_gain;
+        hw.out.gain_cur=(int)(master_gain>>1)<<15; hw.out.gain_step=0; hw.out.ramp=0; hw.out.gain_init=1;
+        diag_fault=0; diag_stage=2;
+        max_gap=total_refills=wakes=diag_irqs=max_burst=pre_calls=pre_skips=0;
+        resync_count=last_resync_reason=last_resync_at=0;
+        fault_cs=fault_debug=fault_cb=0;
+        Forbid();
+        c->active=1;  /* before the ring is filled: the low latency ring mixes it before DMA starts */
+        hw.ready=0; hw.error=AHIE_UNKNOWN; hw.stop_requested=0;
+        hw.running=1; hw.command=1;
+        hw.process.waiter=FindTask(NULL); hw.process.wake=1UL<<signal;
+        if(hw.process.task) Signal((struct Task *)hw.process.task,SIGBREAKF_CTRL_D);
+        else if(!hdmi_spawn(&hw.process,worker_entry,&hw)) {
+            diag_fault=16; hw.running=0; hw.command=0;
+        }
+        while(hw.running && !hw.ready) Wait(hw.process.wake);
+        hw.process.waiter=NULL;
+        result=hw.error; Permit();
+        FreeSignal(signal);
     }
-    while(p->running && !p->ready) Wait(p->process.wake);
-    p->process.waiter=NULL;
-    result=p->error; Permit();
-    FreeSignal(signal);
+    ReleaseSemaphore(&api_lock);
     if(result!=AHIE_OK) driver_stop(AHISF_PLAY,ctrl);
     return result;
 }
 void driver_free(struct AHIAudioCtrlDrv *ctrl)
 {
-    struct Playback *p=ctrl->ahiac_DriverData;
+    struct Client *c=ctrl->ahiac_DriverData;
     BYTE signal;
-    if(!p) return;
+    unsigned i;
+    if(!c) return;
     diag_stage=60;
     driver_stop(AHISF_PLAY,ctrl);
-    signal=AllocSignal(-1);
+    ObtainSemaphore(&api_lock);
     Forbid();
-    p->process.waiter=signal>=0?FindTask(NULL):NULL;
-    p->process.wake=signal>=0?1UL<<signal:0;
-    if(p->process.task) {
-        diag_stage=61; p->command=2;
-        Signal((struct Task *)p->process.task,SIGBREAKF_CTRL_D);
-        /* Exit callback runs after DOS cleanup and keeps scheduling forbidden
-         * until DOS removes the task. Only then may context/library be freed. */
-        while(p->process.task) {
-            if(signal>=0) Wait(p->process.wake); else Delay(1);
-        }
+    for(i=0;i<hw.nclients && hw.clients[i]!=c;++i) ;
+    if(i<hw.nclients) {
+        for(;i+1<hw.nclients;++i) hw.clients[i]=hw.clients[i+1];
+        hw.clients[--hw.nclients]=NULL;
     }
-    p->process.waiter=NULL;
+    ctrl->ahiac_DriverData=NULL;
+    Permit();
+    if(!hw.nclients) {
+        /* Last client: end the worker process and give the hardware back. */
+        signal=AllocSignal(-1);
+        Forbid();
+        hw.process.waiter=signal>=0?FindTask(NULL):NULL;
+        hw.process.wake=signal>=0?1UL<<signal:0;
+        if(hw.process.task) {
+            diag_stage=61; hw.command=2;
+            Signal((struct Task *)hw.process.task,SIGBREAKF_CTRL_D);
+            /* Exit callback runs after DOS cleanup and keeps scheduling forbidden
+             * until DOS removes the task. Only then may context/library be freed. */
+            while(hw.process.task) {
+                if(signal>=0) Wait(hw.process.wake); else Delay(1);
+            }
+        }
+        hw.process.waiter=NULL;
+        if(!poisoned) RemSemaphore(&hw.gate);
+        hw.bvb=0;
+        Permit();
+        if(signal>=0) FreeSignal(signal);
+    }
     diag_stage=63;
-    if(!poisoned) { RemSemaphore(&p->gate); owner=NULL; }
-    ctrl->ahiac_DriverData=NULL; Permit();
-    if(signal>=0) FreeSignal(signal);
-    if(!poisoned) FreeVec(p);
+    ReleaseSemaphore(&api_lock);
+    FreeVec(c);
 }
 void driver_disable(void) { Forbid(); }
 void driver_enable(void) { Permit(); }
@@ -580,7 +681,7 @@ LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
     case AHIC_OutputVolume_Query: return (LONG)master_gain;
     case AHIC_OutputVolume: master_gain=arg<0?0UL:(arg>65536L?65536UL:(ULONG)arg); return TRUE;
     case HDMI_QUERY_MIX_BITS: return diag_mix_bits;
-    case HDMI_QUERY_FEATURES: return 3; /* bit 0: interrupt driver, bit 1: master volume */
+    case HDMI_QUERY_FEATURES: return 7; /* bit 0: interrupt driver, bit 1: master volume, bit 2: several clients */
     case HDMI_QUERY_MAX_BURST: return max_burst;
     case HDMI_QUERY_RESYNC_AT: return last_resync_at;
     case HDMI_QUERY_PRE_CALLS: return pre_calls;
@@ -606,9 +707,15 @@ LONG driver_control(ULONG attr,LONG arg,struct AHIAudioCtrlDrv *ctrl)
     case HDMI_QUERY_STATE: {
         ULONG state;
         Forbid();
-        state=(poisoned?1:0) | (owner?2:0) |
-            (owner && owner->process.task?4:0) | (owner && owner->running?8:0) |
-            (owner && owner->stop_requested?16:0) | (owner?owner->command<<8:0);
+        unsigned i,active=0,stopped=0;
+        for(i=0;i<hw.nclients;++i) {
+            if(hw.clients[i]->active) ++active;
+            if(hw.clients[i]->stop_requested) stopped=1;
+        }
+        /* bits 0-4 and 8 as before 4.18 (16: a client was stopped); 12-14: allocated clients, 16-18: playing */
+        state=(poisoned?1:0) | (hw.nclients?2:0) |
+            (hw.process.task?4:0) | (hw.running?8:0) |
+            (stopped?16:0) | (hw.command<<8) | (hw.nclients<<12) | (active<<16);
         Permit();
         return state;
     }
