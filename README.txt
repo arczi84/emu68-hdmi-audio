@@ -1,5 +1,5 @@
-Emu68 HDMI driver 4.18 for AHI (test release)
-==============================================
+Emu68 HDMI driver 4.18 for AHI
+==============================
 HDMI audio for classic Amiga with PiStorm, Raspberry Pi 4 and Emu68.
 Tested with Emu68 1.1 and AHI 6.6.
 New in 4.18: up to four AHI programs can play through HDMI at the same time.

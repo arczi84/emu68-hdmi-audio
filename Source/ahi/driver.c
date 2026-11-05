@@ -90,8 +90,8 @@ static void snapshot_failure(ULONG base) {
 }
 static LONG worker_entry(void);
 static const char name[] = "emu68hdmi.audio";
-static const char ident[] = "emu68hdmi.audio 4.18 (19.10.2026)\r\n";
-const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.18 (19.10.2026)";
+static const char ident[] = "emu68hdmi.audio 4.18 (05.11.2026)\r\n";
+const char ver[] __attribute__((used)) = "$VER: emu68hdmi.audio 4.18 (05.11.2026)";
 
 struct DriverBase *driver_init(struct DriverBase *base, BPTR segment, struct ExecBase *exec)
 {

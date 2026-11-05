@@ -1,6 +1,6 @@
 # Emu68 HDMI driver for AHI — Coded with AI
 
-Driver version **4.18** (test release). Includes the optional EaglePlayer **AHI Amplifier 10.20** engine patched to work with this driver.
+Driver version **4.18**. Includes the optional EaglePlayer **AHI Amplifier 10.20** engine patched to work with this driver.
 
 HDMI audio for classic Amiga with PiStorm, Raspberry Pi 4 and Emu68.
 Tested with Emu68 1.1 and AHI 6.6.
@@ -112,7 +112,7 @@ that EaglePlayer selects the patched amplifier and plays through HDMI.
 On a Raspberry Pi 4 with Emu68 1.1+ under AHI 6.6, a TV on HDMI0: all four modes play a tone and an 8-voice load with no
 fault (checked with the counters). Internet radio and MP3 files were listened to, left / right / centre checked, and the master
 volume was set from AHI Prefs (Output volume) and from a MUI mixer tool, with internet radio playing. Not tested: AHI 4.18 itself, CM4, long game sessions.
-4.18: two sources at once were heard on a PiStorm (a game through AHI plus CD music from CueCD); this release is for wider testing.
+4.18: two sources at once were heard on a PiStorm (a game through AHI plus CD music from CueCD).
 Compatibility with every application has not been established. Please report.
 
 Output is stereo at 48 kHz. Up to four AHI clients can play at once (4.18). Paula audio is not redirected.

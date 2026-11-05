@@ -1,6 +1,6 @@
 # History
 
-## 4.18 (19.10.2026, test release)
+## 4.18 (05.11.2026)
 
 * Up to **four AHI clients** play at once: the HDMI setup, DMA ring, interrupt and worker are shared; each client keeps its own mix
   buffer, PCM cursor and Pre/PostTimer pair. The hardware starts with the first client that plays and stops with the last one.
