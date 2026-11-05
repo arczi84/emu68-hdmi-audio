@@ -1,6 +1,17 @@
 # History
 
+## 4.18 (19.10.2026, test release)
+
+* Up to **four AHI clients** play at once: the HDMI setup, DMA ring, interrupt and worker are shared; each client keeps its own mix
+  buffer, PCM cursor and Pre/PostTimer pair. The hardware starts with the first client that plays and stops with the last one.
+* Clients are summed in a 24 bit accumulator (`pcm_mix`), saturated and packed once (`pcm_mix_finish`); a single client is bit exact
+  with 4.17. A client whose hooks fail is muted until its next START instead of stopping the others.
+* `HDMI_QUERY_FEATURES` bit 2, `HDMI_QUERY_STATE` bits 12-14 (allocated) and 16-18 (playing); `HDMIDiag` prints them.
+* New host test `mix_test` (also run natively in vamos); the ABI test covers two clients, freeing one while the other stays, and the limit.
+
 ## 4.17 (13.10.2026)
+
+The 4.17 changes below are the work of flype44 (pull request #1, irq-lowlatency-volume).
 
 * DMA completion by **interrupt** (`gic400.library`) instead of a 1 kHz polling task: about 15 wake-ups per second instead of ~800,
   no `Disable()` around the copy, a 4 Hz watchdog for a lost interrupt.

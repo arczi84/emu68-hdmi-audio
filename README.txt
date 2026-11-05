@@ -1,8 +1,9 @@
-Emu68 HDMI driver 4.17 for AHI
-======================================
+Emu68 HDMI driver 4.18 for AHI (test release)
+==============================================
 HDMI audio for classic Amiga with PiStorm, Raspberry Pi 4 and Emu68.
 Tested with Emu68 1.1 and AHI 6.6.
-See README.md for what is new in 4.17 (DMA interrupt, low latency modes, master volume).
+New in 4.18: up to four AHI programs can play through HDMI at the same time.
+See README.md for details and for 4.17 (DMA interrupt, low latency modes, master volume).
 
 INSTALLATION
 Back up the existing driver and mode file. From this package directory:
@@ -29,7 +30,7 @@ TEST RESULTS AND NOTES
 Hardware playback tests passed; no crackling was reported in the latest
 tests. This does not establish compatibility with every application.
 Output is stereo at 48 kHz, with approximately 192 ms of buffering (about 48 ms in the low latency modes).
-One HDMI client can run at a time. Paula audio is not redirected.
+Up to four AHI clients can play at once. Paula audio is not redirected.
 Heavy CPU stalls can cause repeated audio while the driver resynchronizes.
 For diagnostics, run Tools/HDMIDiag before starting another audio test.
 To roll back, restore the backed-up files and restart the Amiga.

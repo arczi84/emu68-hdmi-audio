@@ -1,9 +1,25 @@
 # Emu68 HDMI driver for AHI — Coded with AI
 
-Driver version **4.17**. Includes the optional EaglePlayer **AHI Amplifier 10.20** engine patched to work with this driver.
+Driver version **4.18** (test release). Includes the optional EaglePlayer **AHI Amplifier 10.20** engine patched to work with this driver.
 
 HDMI audio for classic Amiga with PiStorm, Raspberry Pi 4 and Emu68.
 Tested with Emu68 1.1 and AHI 6.6.
+
+## What is new in 4.18
+
+Up to **four AHI programs can play through HDMI at the same time**, for example a game and a CD player (CueCD) or two music
+players. Up to 4.17 the driver accepted one client: a second `AllocAudio` failed while the first program held HDMI.
+
+| Change | Effect |
+|---|---|
+| Several AHI audio controls share the hardware | the first one that plays starts HDMI, the DMA ring, the interrupt and the worker; the last `Stop` ends them |
+| Each client is mixed into a 24 bit accumulator, then saturated and packed once | 16 bit and HiFi clients play together; a full scale sum clips instead of wrapping |
+| One client sounds exactly as in 4.17 | bit exact, checked by a host test (`mix_test`) for 16 and 32 bit input, the master gain and blocks that cross segments |
+| Per client PreTimer / PostTimer and fault handling | AHI's overload protection and a failing client only mute that client; the others keep playing |
+| `HDMIDiag` shows `AHI clients: N allocated, M playing` | `HDMI_QUERY_FEATURES` bit 2 |
+
+The ring geometry (long or low latency) is taken from the mode of the client that starts the hardware; clients that join later
+follow it. All clients run at 48 kHz, as before. AHI Prefs may now select HDMI for the Music Unit and Units 0-3 and use them together.
 
 ## What is new in 4.17
 
@@ -40,7 +56,7 @@ driver. This release requires AHI 6.x; tested with AHI 6.6. AHI 4.18 compatibili
   the low latency modes mix the whole ring before the DMA starts.
 * These are **not** AHI "realtime" (~10 ms). `AHIDB_Realtime` stays TRUE on all four so that they remain selectable on
   Units 0-3 of AHI Prefs, as in 4.16.
-* 48 kHz stereo only, one HDMI client at a time, no recording: unchanged.
+* 48 kHz stereo only, no recording: unchanged. Since 4.18 up to four clients can play at once.
 
 ## Master volume
 
@@ -80,7 +96,7 @@ in memory is not replaced by copying a file. In Prefs/AHI, select an Emu68 HDMI 
 Music Unit and Units 0-3, then save. Applications with their own AHI mode selector also need HDMI selected in their settings.
 Roll back by restoring the two files you backed up and rebooting.
 
-Requirements (4.16 and 4.17): Raspberry Pi 4 / CM4, an HDMI display on **HDMI0**, AHI 6.x (tested with 6.6), and **Emu68 1.1 or later with
+Requirements (4.16 to 4.18): Raspberry Pi 4 / CM4, an HDMI display on **HDMI0**, AHI 6.x (tested with 6.6), and **Emu68 1.1 or later with
 its embedded Emu68 ROM**. The driver does not load anything itself: it opens `devicetree.resource`, `mailbox.resource` and (4.17)
 `gic400.library` (version 1.3 or later; `Version gic400.library` must answer 1.3+), which the ROM of Emu68 1.1+ exposes. **Emu68 1.0
 and earlier versions are not compatible.**
@@ -96,9 +112,10 @@ that EaglePlayer selects the patched amplifier and plays through HDMI.
 On a Raspberry Pi 4 with Emu68 1.1+ under AHI 6.6, a TV on HDMI0: all four modes play a tone and an 8-voice load with no
 fault (checked with the counters). Internet radio and MP3 files were listened to, left / right / centre checked, and the master
 volume was set from AHI Prefs (Output volume) and from a MUI mixer tool, with internet radio playing. Not tested: AHI 4.18 itself, CM4, long game sessions.
+4.18: two sources at once were heard on a PiStorm (a game through AHI plus CD music from CueCD); this release is for wider testing.
 Compatibility with every application has not been established. Please report.
 
-Output is stereo at 48 kHz. One HDMI client can run at a time. Paula audio is not redirected.
+Output is stereo at 48 kHz. Up to four AHI clients can play at once (4.18). Paula audio is not redirected.
 Heavy CPU stalls can cause repeated audio while the driver resynchronizes; the low latency modes have less margin.
 For diagnostics, run Tools/HDMIDiag before starting another audio test.
 

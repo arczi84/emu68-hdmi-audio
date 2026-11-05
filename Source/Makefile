@@ -42,6 +42,8 @@ test:
 	./build/pcm_fast_test
 	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/gain_test.c -o build/gain_test
 	./build/gain_test
+	cc -std=c99 -Wall -Wextra -Werror -fsanitize=undefined,address tests/mix_test.c -o build/mix_test
+	./build/mix_test
 
 test-cli: all
 	python3 tests/cli_test.py
@@ -95,9 +97,14 @@ build/ahi_abi_test: ahi/abi_test.c ahi/abi_test.S ahi/status.S ahi/status.h dist
 	mkdir -p build
 	$(CC) $(AHI_FLAGS) ahi/abi_test.c ahi/abi_test.S ahi/status.S -o $@
 
-test-ahi: build/ahi_abi_test build/ahi_pcm_test dist/Emu68HDMI
+test-ahi: build/ahi_abi_test build/ahi_pcm_test build/ahi_mix_test dist/Emu68HDMI
 	python3 -c 'from amitools.tools.vamos import main; import sys; sys.exit(main(["-C","68020","build/ahi_abi_test"]))'
 	python3 -c 'from amitools.tools.vamos import main; import sys; sys.exit(main(["-C","68020","build/ahi_pcm_test"]))'
+	python3 -c 'from amitools.tools.vamos import main; import sys; sys.exit(main(["-C","68020","build/ahi_mix_test"]))'
+
+build/ahi_mix_test: tests/mix_test.c ahi/pcm.h src/audio.h src/dma_plan.h
+	mkdir -p build
+	$(CC) $(AHI_FLAGS) tests/mix_test.c -o $@
 
 build/ahi_pcm_test: ahi/pcm_test.c ahi/pcm.h src/audio.h src/dma_plan.h
 	mkdir -p build
